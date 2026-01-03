@@ -2,11 +2,11 @@
 """
 downloader_jp.py
 ----------------
-日股資料下載器（穩定單執行緒版）
+日股資料下載器（穩定單執行緒連動版）
 
-✔ 改為單執行緒循環：確保 JPX 大量標的下載時數據 100% 準確
+✔ 支援外部日期傳參：由 main.py 統一指定下載區間
+✔ 單執行緒循環：確保 JPX 大量標的下載時數據 100% 準確
 ✔ 自動處理 .xls：解決 JPX 官方清單讀取問題
-✔ 結構統一：完全支援 Alpha Lab 連動機制
 """
 
 import os, sys, sqlite3, time, random, io, subprocess
@@ -90,7 +90,7 @@ def get_jp_stock_list():
         raw_code = row.get(C_CODE)
         if pd.isna(raw_code): continue
 
-        # 修正 Excel 代碼格式 (例如 7203.0 -> 7203)
+        # 修正 Excel 代碼格式
         code = str(raw_code).split(".")[0].strip()
 
         # 僅保留 4 位數純數字普通股
@@ -115,16 +115,18 @@ def get_jp_stock_list():
     return stock_list
 
 # =====================================================
-# 4. 下載核心 (單執行緒穩定版)
+# 4. 下載核心 (支援傳入日期)
 # =====================================================
-def download_one_jp(symbol, mode):
-    start_date = "2023-01-01" if mode == "hot" else "2000-01-01"
+def download_one_jp(symbol, start_date, end_date):
+    """
+    接收來自 run_sync 的日期區間進行下載
+    """
     max_retries = 2
     
     for attempt in range(max_retries + 1):
         try:
-            # 💡 核心修正：threads=False 徹底禁止併發，解決資料錯亂
-            df = yf.download(symbol, start=start_date, progress=False, 
+            # 💡 核心修正：使用傳入的日期參數，並維持 threads=False 穩定性
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False, 
                              auto_adjust=True, threads=False, timeout=30)
 
             if df is None or df.empty:
@@ -152,9 +154,12 @@ def download_one_jp(symbol, mode):
             return None
 
 # =====================================================
-# 5. 主流程
+# 5. 主流程 (對齊 main.py 呼叫介面)
 # =====================================================
-def run_sync(mode="hot"):
+def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
+    """
+    由 main.py 呼叫，傳入全域統一的日期範圍
+    """
     start_time = time.time()
     init_db()
 
@@ -162,7 +167,7 @@ def run_sync(mode="hot"):
     if not items:
         return {"success": 0, "has_changed": False}
 
-    log(f"🚀 開始日股同步 (安全模式) | 目標: {len(items)} 檔")
+    log(f"🚀 開始日股同步 | 區間: {start_date} ~ {end_date} | 目標: {len(items)} 檔")
 
     success_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
@@ -170,21 +175,21 @@ def run_sync(mode="hot"):
     # 單執行緒循環
     pbar = tqdm(items, desc="JP同步")
     for symbol, name in pbar:
-        df_res = download_one_jp(symbol, mode)
+        # 將傳入的日期轉交給下載核心
+        df_res = download_one_jp(symbol, start_date, end_date)
         
         if df_res is not None:
-            # 使用 executemany 批次寫入以增進單執行緒下的效能
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
                           method=lambda table, conn, keys, data_iter: 
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
         
-        # 🟢 加入微小延遲防止被 Yahoo 封鎖
+        # 🟢 防止觸發 Yahoo 頻率限制
         time.sleep(0.05)
 
     conn.commit()
     
-    # 統計
+    # 統計與優化
     log("🧹 執行資料庫 VACUUM...")
     conn.execute("VACUUM")
     total_in_db = conn.execute("SELECT COUNT(DISTINCT symbol) FROM stock_info").fetchone()[0]
@@ -200,5 +205,5 @@ def run_sync(mode="hot"):
     }
 
 if __name__ == "__main__":
-    run_sync(mode="hot")
-
+    # 手動執行測試
+    run_sync(start_date="2024-01-01", end_date=datetime.now().strftime("%Y-%m-%d"))
