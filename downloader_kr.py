@@ -12,158 +12,127 @@ DB_PATH = os.path.join(BASE_DIR, "kr_stock_warehouse.db")
 def log(msg: str):
     print(f"{pd.Timestamp.now():%H:%M:%S}: {msg}", flush=True)
 
-# 降噪：避免 yfinance 在下載時印出過多不必要的錯誤資訊
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-# ========== 2. KIND 產業資料抓取 (選配) ==========
-def fetch_kind_industry_map():
-    url = "http://kind.krx.co.kr/corpgeneral/corpList.do?method=download&searchType=13"
-    log("📡 正在從 KIND 下載韓股權威產業對照表...")
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=20)
-        # 韓國 KIND 網站有時會阻擋特定 IP，這裡加入 try-except
-        dfs = pd.read_html(io.BytesIO(r.content), flavor='bs4')
-        if not dfs: return {}
-        df = dfs[0]
-        industry_map = {str(row['종목코드']).strip().zfill(6): str(row['업종']).strip() for _, row in df.iterrows()}
-        return industry_map
-    except Exception as e:
-        log(f"⚠️ KIND 抓取跳過 (將使用預設分類): {e}")
-        return {}
-
-# ========== 3. 獲取韓股清單 (採用 pykrx 作為核心) ==========
+# ========== 2. 獲取韓股清單 (三重保險機制) ==========
 def get_kr_stock_list():
-    """
-    結合 pykrx 與 KIND 獲取最完整的清單。
-    如果失敗，會嘗試從現有資料庫獲取舊名單。
-    """
-    log("📡 正在透過 pykrx 獲取最新韓股清單...")
+    log("📡 啟動韓股清單獲取任務...")
     items = []
+    
+    # --- 保險 1：嘗試 pykrx (官方對接) ---
     try:
         from pykrx import stock as krx
+        log("🔍 [保險 1] 嘗試透過 pykrx 獲取清單...")
         today = datetime.now().strftime("%Y%m%d")
-        
-        # 獲取 KOSPI 與 KOSDAQ 的代碼
-        kind_map = fetch_kind_industry_map()
-        
         for mk, suffix in [("KOSPI", ".KS"), ("KOSDAQ", ".KQ")]:
             tickers = krx.get_market_ticker_list(today, market=mk)
             for t in tickers:
                 code = str(t).strip().zfill(6)
                 name = krx.get_market_ticker_name(t)
-                symbol = f"{code}{suffix}"
-                sector = kind_map.get(code, "Other/Unknown")
-                items.append((symbol, name, sector, mk))
-        
-        # 將清單更新到資料庫的 info 表
-        conn = sqlite3.connect(DB_PATH)
-        for sym, nm, sec, mk in items:
-            conn.execute("""
-                INSERT OR REPLACE INTO stock_info (symbol, name, sector, market, updated_at) 
-                VALUES (?, ?, ?, ?, ?)
-            """, (sym, nm, sec, mk, datetime.now().strftime("%Y-%m-%d")))
-        conn.commit()
-        conn.close()
-        log(f"✅ 韓股清單整合成功: 共 {len(items)} 檔")
-        
+                items.append((f"{code}{suffix}", name, "Stock", mk))
+        if items:
+            log(f"✅ pykrx 獲取成功: {len(items)} 檔")
+            return items
     except Exception as e:
-        log(f"❌ pykrx 獲取清單失敗: {e}")
-        # 備援：從本地資料庫提取
-        if os.path.exists(DB_PATH):
-            log("🔄 嘗試從本地資料庫提取既有名單進行更新...")
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                items = conn.execute("SELECT symbol, name, sector, market FROM stock_info").fetchall()
-                conn.close()
-                log(f"✅ 從本地提取了 {len(items)} 檔標的")
-            except: pass
-            
+        log(f"⚠️ pykrx 失敗: {e}")
+
+    # --- 保險 2：嘗試 Yahoo Finance 常用權值股 (保底名單) ---
+    # 如果連 API 都抓不到，至少讓程式有東西可以跑，而不是直接結束
+    if not items:
+        log("🔍 [保險 2] 嘗試保底名單 (權值股)...")
+        fallback_list = [
+            ("005930.KS", "Samsung Electronics", "Stock", "KOSPI"),
+            ("000660.KS", "SK Hynix", "Stock", "KOSPI"),
+            ("035420.KQ", "NAVER", "Stock", "KOSDAQ"),
+            ("005380.KS", "Hyundai Motor", "Stock", "KOSPI")
+        ]
+        items = fallback_list
+
+    # --- 保險 3：從資料庫讀取既有名單 (Resume 模式) ---
+    if os.path.exists(DB_PATH):
+        log("🔍 [保險 3] 嘗試從本地資料庫讀取既有名單...")
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            db_items = conn.execute("SELECT symbol, name, sector, market FROM stock_info").fetchall()
+            conn.close()
+            if db_items:
+                log(f"✅ 從資料庫恢復了 {len(db_items)} 檔名單")
+                return db_items
+        except:
+            pass
+
     return items
 
-# ========== 4. 下載核心 (單執行緒穩定版) ==========
+# ========== 3. 下載核心 (強化連線穩定度) ==========
 def download_one_kr(symbol, start_date, end_date):
-    max_retries = 1
-    for attempt in range(max_retries + 1):
+    # 韓國市場下載最怕 429 錯誤，這裡強制隨機等待
+    time.sleep(random.uniform(0.1, 0.5))
+    
+    for attempt in range(2):
         try:
-            # interval="1d" 並關閉 threads 避免記憶體衝突
             df = yf.download(symbol, start=start_date, end=end_date, progress=False, 
-                             auto_adjust=True, threads=False, timeout=20)
-            
-            if df is None or df.empty: return None
-            
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+                             auto_adjust=True, threads=False, timeout=30)
+            if df is not None and not df.empty:
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
+                df.reset_index(inplace=True)
+                df.columns = [c.lower() for c in df.columns]
+                date_col = 'date' if 'date' in df.columns else df.columns[0]
+                df['date_str'] = pd.to_datetime(df[date_col]).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
                 
-            df.reset_index(inplace=True)
-            df.columns = [c.lower() for c in df.columns]
-            
-            # 取得日期並統一格式
-            date_col = 'date' if 'date' in df.columns else df.columns[0]
-            df['date_str'] = pd.to_datetime(df[date_col]).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
-            
-            # 過濾量為 0 的日子 (代表停牌或無交易)
-            df = df[df['volume'] > 0]
-            
-            df_final = df[['date_str', 'open', 'high', 'low', 'close', 'volume']].copy()
-            df_final.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            df_final['symbol'] = symbol
-            return df_final
-        except Exception:
-            if attempt < max_retries: time.sleep(random.uniform(1, 3))
+                df_final = df[['date_str', 'open', 'high', 'low', 'close', 'volume']].copy()
+                df_final.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+                df_final['symbol'] = symbol
+                return df_final
+        except Exception as e:
+            log(f"  ❌ {symbol} 重試中 ({attempt+1}/2): {e}")
+            time.sleep(2)
     return None
 
-# ========== 5. 主流程 (對齊 main.py) ==========
+# ========== 4. 主流程 (增加空數據檢查) ==========
 def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
     start_time = time.time()
     
-    # 初始化資料庫
+    # 初始化
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('''CREATE TABLE IF NOT EXISTS stock_prices (
-                        date TEXT, symbol TEXT, open REAL, high REAL, 
-                        low REAL, close REAL, volume INTEGER,
-                        PRIMARY KEY (date, symbol))''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS stock_info (
-                        symbol TEXT PRIMARY KEY, name TEXT, sector TEXT, market TEXT, updated_at TEXT)''')
+    conn.execute('CREATE TABLE IF NOT EXISTS stock_prices (date TEXT, symbol TEXT, open REAL, high REAL, low REAL, close REAL, volume INTEGER, PRIMARY KEY (date, symbol))')
+    conn.execute('CREATE TABLE IF NOT EXISTS stock_info (symbol TEXT PRIMARY KEY, name TEXT, sector TEXT, market TEXT, updated_at TEXT)')
     conn.close()
     
     items = get_kr_stock_list()
     if not items:
-        log("⚠️ 無法獲取名單且資料庫無舊檔，跳過本次同步。")
+        log("❌ 關鍵錯誤：所有清單獲取管道均失效，跳過韓股。")
         return {"success": 0, "has_changed": False}
 
-    log(f"🚀 開始韓股同步 | 區間: {start_date} ~ {end_date} | 目標: {len(items)} 檔")
+    log(f"🚀 開始下載... (區間: {start_date} ~ {end_date})")
 
     success_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
     
-    # 執行下載
     for item in tqdm(items, desc="KR同步"):
-        # 由於 item 可能是 tuple (來自 DB) 或 list，統一處理
         symbol = item[0]
-        name = item[1]
-        
         df_res = download_one_kr(symbol, start_date, end_date)
+        
         if df_res is not None:
-            # 執行 Upsert (Insert or Replace)
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
                           method=lambda table, conn, keys, data_iter: 
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
+            
+            # 更新 Info 表 (確保下次失敗時能用)
+            conn.execute("INSERT OR REPLACE INTO stock_info VALUES (?, ?, ?, ?, ?)", 
+                         (symbol, item[1], item[2], item[3], datetime.now().strftime("%Y-%m-%d")))
             success_count += 1
-        
-        # 韓股下載稍微加一點點延遲，避免 yf 被節流
-        time.sleep(random.uniform(0.01, 0.05))
+            
+        # 每 100 筆 commit 一次，增加效率與安全性
+        if success_count % 100 == 0:
+            conn.commit()
 
     conn.commit()
-    log("🧹 執行資料庫 VACUUM...")
+    log("🧹 資料庫 VACUUM...")
     conn.execute("VACUUM")
     conn.close()
     
-    duration = (time.time() - start_time) / 60
-    log(f"📊 韓股同步完成 | 更新成功: {success_count} / {len(items)} | 耗時: {duration:.1f} 分鐘")
-    
+    log(f"📊 同步完成！更新成功: {success_count} / {len(items)}")
     return {"success": success_count, "total": len(items), "has_changed": success_count > 0}
 
 if __name__ == "__main__":
