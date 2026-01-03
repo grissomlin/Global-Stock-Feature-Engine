@@ -2,7 +2,6 @@ import streamlit as st
 import os, json, sqlite3, io
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
 from scipy.stats import skew, kurtosis
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -103,87 +102,97 @@ if service:
                     hide_index=True, use_container_width=True
                 )
 
-
-                  # --- 5. 漲跌幅分佈柱狀圖 (視覺化) ---
-                if not res_df.empty:
+                # --- 5. 報酬分布分箱統計 (漲幅與跌幅雙矩陣) ---
+                if not res_df.empty and len(existing_features) > 0:
                     st.divider()
-                    st.header("📊 策略報酬分佈視覺化")
-                    
-                    # 準備數據
-                    bins_total = [-100, -20, -10, -5, 0, 5, 10, 20, 50, 100, 500]
-                    labels_total = ["<-20%", "-20~-10%", "-10~-5%", "-5~0%", "0~5%", "5~10%", "10~20%", "20~50%", "50~100%", ">100%"]
-                    
-                    # 計算家數與比例
-                    res_df['total_bin'] = pd.cut(res_df[up_col if strategy_type != "無" else 'ytd_ret'], bins=bins_total, labels=labels_total)
-                    counts = res_df['total_bin'].value_counts().sort_index()
-                    percents = (counts / len(res_df) * 100).round(2)
-                    
-                    # 設定顏色：負值紅色，正值藍色 (符合台灣視覺習慣)
-                    colors = ['#e74c3c' if "~-" in label or "<-" in label else '#3498db' for label in labels_total]
-                    
-                    # 使用 Plotly 繪製柱狀圖
-                    fig = go.Figure(data=[go.Bar(
-                        x=labels_total,
-                        y=counts,
-                        text=[f"{c}家 ({p}%)" for c, p in zip(counts, percents)], # 在柱子上顯示家數與比例
-                        textposition='auto',
-                        marker_color=colors
-                    )])
-                    
-                    fig.update_layout(
-                        title=f"未來 {reward_period} 天漲跌幅分佈圖 (樣本數: {len(res_df)} 家)",
-                        xaxis_title="漲跌幅區間",
-                        yaxis_title="家數",
-                        height=500,
-                        margin=dict(l=20, r=20, t=50, b=20)
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.header(f"📊 特徵統計矩陣 (分箱分析 vs 技術特徵)")
                 
-                # --- 6. 特徵統計矩陣 (原有的矩陣邏輯放在圖表下方) ---
-                # ... [保留原本的 create_stat_matrix 邏輯] ...
+                    # 💡 修改後的統計函式：加入比例計算
+                    def create_stat_matrix(data, bin_col, feat_cols):
+                        stats_list = []
+                        total_samples = len(data) # 總樣本數
+                        
+                        for b_label, group in data.groupby(bin_col, observed=True):
+                            sample_count = len(group)
+                            proportion = (sample_count / total_samples * 100) if total_samples > 0 else 0
+                            
+                            row = {
+                                "分箱區間": b_label, 
+                                "樣本數": sample_count,
+                                "比例(%)": f"{proportion:.2f}%" # 👈 新增比例欄位
+                            }
+                            
+                            for f in feat_cols:
+                                row[f"{f}_平均"] = group[f].mean()
+                                row[f"{f}_中位數"] = group[f].median()
+                                row[f"{f}_偏度(爆發力)"] = skew(group[f]) if len(group) > 3 else 0
+                                row[f"{f}_峰度(穩定度)"] = kurtosis(group[f]) if len(group) > 3 else 0
+                            stats_list.append(row)
+                        return pd.DataFrame(stats_list)
+                
+                    # 1. 最大漲幅分箱
+                    st.subheader("📈 最大漲幅分箱特徵 (觀察勝率分布)")
+                    bins_up = [-100, 0, 5, 10, 20, 50, float('inf')]
+                    labels_up = ["下行", "0-5%", "5-10%", "10-20%", "20-50%", ">50%"]
+                    res_df['bin_up'] = pd.cut(res_df[up_col], bins=bins_up, labels=labels_up)
+                    
+                    up_matrix = create_stat_matrix(res_df, 'bin_up', existing_features)
+                    st.dataframe(up_matrix, use_container_width=True)
+                
+                    # 2. 最大跌幅分箱
+                    st.subheader("📉 最大跌幅分箱特徵 (觀察風險分布)")
+                    bins_down = [float('-inf'), -20, -10, -5, 0, 100]
+                    labels_down = ["重摔(<-20%)", "大跌(-20%~-10%)", "中跌(-10%~-5%)", "小跌(-5%~0%)", "抗跌(>0%)"]
+                    res_df['bin_down'] = pd.cut(res_df[down_col], bins=bins_down, labels=labels_down)
+                    
+                    down_matrix = create_stat_matrix(res_df, 'bin_down', existing_features)
+                    st.dataframe(down_matrix, use_container_width=True)
+                
+                    # --- 6. AI 提示詞 (更新包含比例資訊) ---
+                    st.divider()
+                    st.subheader("🤖 AI 量化大師提示詞")
+                    prompt = f"""
+                你是一位量化投資專家。請分析以下兩份數據：
+                漲幅特徵矩陣 (含比例)：{up_matrix.to_csv(index=False)}
+                跌幅特徵矩陣 (含比例)：{down_matrix.to_csv(index=False)}
+                
+                請幫我分析：
+                1. 哪個『比例』最高的分箱代表了此策略的常態表現？其斜率特徵為何？
+                2. 在高報酬分箱中，比例雖然可能較低，但其斜率與常態區間有何顯著差異？
+                3. 如何調整斜率門檻，才能降低『重摔』分箱的佔比？
+                """
+                    st.code(prompt, language="markdown")
                 
                 # --- 7. 通俗版解釋區 ---
                 st.divider()
-                st.header("📖 投資小學堂：什麼是「特徵欄位」？")
-                
-                with st.expander("💡 深入淺出：特徵欄位分析是什麼？ (點擊展開)"):
+                with st.expander("📝 為什麼這些指標能預測漲跌？ (通俗版解釋)"):
                     st.markdown("""
-                    ### 🧬 什麼是「特徵欄位」 (Feature Fields)？
+                    ### 🔎 技術指標與漲跌的「模式」
                     
-                    如果把「股價」比喻成一個人的**長相**，那麼「特徵欄位」就是這個人的**基因與體檢數據**。
+                    * **MA20 斜率 (短期動能)**
+                        * **大漲模式**：通常斜率 > 0.1 且持續增加。這像是一台正在「加速」的跑車。
+                        * **大跌模式**：如果股價在高檔，MA20 斜率開始「轉平」甚至變負數，通常是大跌的前兆。
                     
-                    * **傳統分析**：看著照片（股價圖）說：「這個人看起來紅光滿面，應該會長壽（漲）。」這比較主觀。
-                    * **特徵分析**：測量血壓（MA20斜率）、心跳（MACD速度）、體脂率（MA60斜率）。我們不看長相，我們看**數據指標**。
-                    
-                    **特徵分析的威力**在於：我們可以透過歷史數據發現，「血壓 120、心跳 70（特定斜率組合）」的人，有 80% 的機率能跑完馬拉松（大漲 20%）。
-                    
-                    ---
-                
-                    ### 🔎 本系統的三大「核心基因」
-                    
-                    
-                    1. **MA20 斜率 (短期動能)**
-                        * **像什麼**：車子的**時速表**。
-                        * **怎麼看**：斜率大代表衝很快，但如果太高（如斜率 > 1），代表車速過快，轉彎容易翻車（重摔）。
-                    
-                    2. **MA60 斜率 (長期趨勢)**
-                        * **像什麼**：跑道的**坡度**。
-                        * **怎麼看**：斜率是正的，代表你在跑下坡（順風），就算腳痠（回檔）也容易繼續滑行；斜率是負的，代表你在爬好漢坡（逆風），非常吃力。
+                    * **MA60 斜率 (長期趨勢/地基)**
+                        * **大漲模式**：MA60 斜率最好是正的。就像在順風跑，即便短線拉回，也會有支撐。
+                        * **大跌模式**：若 MA60 斜率是負的，代表「大勢已去」，這時任何反彈都是逃命波。
                         
-                    3. **MACD 動能速度 (加速度)**
-                        * **像什麼**：你的**油門深度**。
-                        * **怎麼看**：加速度由負轉正，代表你開始踩油門了！這通常發生在價格還沒噴發前，是量化交易員最愛的「轉折特徵」。
-                
+                    * **MACD 動能速度 (加速度)**
+                        * **大漲模式**：這是在看「力道的轉折」。當速度從負轉正，代表空頭力竭、多頭接手。
+                        * **大跌模式**：速度如果在高檔開始劇烈下滑，代表多頭力道正在消失，往往會伴隨急跌。
+
                     ---
-                
-                    ### 📈 為什麼要看偏度與峰度？ (大白的解釋)
+
+                    ### 📊 統計學特徵是在看什麼？
                     
-                
-                    * **偏度 (Skewness) —— 「發財機會」**
-                        * **正偏 (大於0)**：代表這堆股票裡藏著幾隻「超級飆股」，雖然平均漲 5%，但那幾隻飆股可能漲了 50%！這是有機會「中大獎」的特徵。
+                    * **平均值 (Mean) / 中位數 (Median)**
+                        * **解釋**：這組標的的「平均表現」。
                     
-                    * **峰度 (Kurtosis) —— 「複製成功」**
-                        * **高峰度**：代表這群股票的表現「整齊劃一」。如果一個策略峰度很高且平均獲利，代表你可以很放心地**重複操作**，因為標的表現都很穩定。
+                    * **偏度 (Skewness) —— 「爆發力偵測」**
+                        * **解釋**：如果偏度是**正值 (正偏)**，代表這區間裡混著幾隻「超級大黑馬」拉高了數據，這組策略有中大獎的潛力！
+                        
+                    * **峰度 (Kurtosis) —— 「穩定度偵測」**
+                        * **解釋**：數值越高，代表這群股票的特性「長得越像」。如果峰度很高，代表這組指標很「準」，選出來的標的表現都很統一。
                     """)
 
             else:
