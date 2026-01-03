@@ -67,31 +67,9 @@ reward_period = st.sidebar.selectbox("評估未來報酬區間", ["1-5", "6-10",
 up_col = f"up_{reward_period}"
 down_col = f"down_{reward_period}"
 
-# --- 4. 主標題與全球即時戰報 ---
+# --- 4. 主標題 ---
 st.title("🌐 全球股市特徵引擎 - 策略篩選中心")
-
-def show_global_battlefield():
-    if os.path.exists("global_summary.json"):
-        with open("global_summary.json", "r", encoding="utf-8") as f:
-            summary_data = json.load(f)
-        
-        st.header("🌍 全球市場戰況報")
-        cols = st.columns(len(summary_data))
-        
-        for i, m in enumerate(summary_data):
-            with cols[i]:
-                color = "normal" if "✅" in m['status'] else "inverse"
-                st.metric(
-                    label=f"{m['market']} 市場",
-                    value=f"{m['success']} 家",
-                    delta=f"{m['coverage']} 涵蓋",
-                    delta_color=color
-                )
-                st.caption(f"📅 最後更新: {m['end_date']}")
-    else:
-        st.info("ℹ️ 尚未偵測到全球摘要數據 (global_summary.json)，請確認後台同步流程。")
-
-show_global_battlefield()
+st.markdown(f"**當前選擇市場:** {selected_market_label} | **分析時段:** {year}年{month}月 | **策略:** {strategy_type}")
 
 # --- 5. 數據核心：讀取與過濾 ---
 service = get_gdrive_service()
@@ -331,7 +309,6 @@ with st.expander("💡 什麼是「特徵欄位分析」？"):
     ```
     本儀表板的統計矩陣功能，正是幫助您挖掘這些隱藏的「特徵化學反應」！
     """)
-
 
 # --- 8. 頁尾連結區 (新增打賞按鈕) ---
 st.divider()
