@@ -10,7 +10,7 @@ on:
         type: choice
         options: [all, tw, us, cn, hk, jp, kr]
   schedule:
-    - cron: '0 6 * * 1-5'
+    - cron: '0 6 * * 1-5' # 台北時間 14:00 執行
 
 jobs:
   prepare-matrix:
@@ -41,6 +41,8 @@ jobs:
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       GDRIVE_SERVICE_ACCOUNT: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
       GH_PAT: ${{ secrets.GH_PAT }}
+      # 💡 核心修正：正式加入 Google Drive 資料夾 ID 變數
+      GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
 
     steps:
       - name: Checkout Code
@@ -50,37 +52,38 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip' # 💡 快取 Python 套件
+          cache: 'pip'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install resend google-api-python-client google-auth-httplib2 google-auth-oauthlib python-dotenv pandas-ta tqdm yfinance
+          # 確保所有分析所需的套件都安裝到位
+          pip install resend google-api-python-client google-auth-httplib2 google-auth-oauthlib python-dotenv pandas-ta tqdm yfinance numpy pandas
 
-      # 🚀 新增：資料庫檔案快取 (GitHub Cache)
+      # 🚀 資料庫檔案快取 (GitHub Cache)
+      # 增加 v2 標籤以避免與之前失敗的目錄混淆
       - name: 💾 Restore Market Database Cache
         id: db-cache
         uses: actions/cache@v3
         with:
           path: |
             *.db
-          # 使用市場代碼作為 Key，確保六台機器不會互相覆蓋
-          # 這裡使用 run_id 的前綴來確保每次執行都有機會儲存新的內容
-          key: ${{ matrix.market }}-db-v1-${{ github.run_id }}
+          key: ${{ matrix.market }}-db-v2-${{ github.run_id }}
           restore-keys: |
-            ${{ matrix.market }}-db-v1-
+            ${{ matrix.market }}-db-v2-
 
       - name: Run Market Update
         run: |
-          # main.py 會先檢查本地是否有快取恢復的 .db，如果沒有才去 Google Drive 抓
+          # 使用 -u 讓 Python 即時印出 Log
           python -u main.py ${{ matrix.market }}
 
-      # 📢 觸發連動 (維持原樣)
+      # 📢 觸發連動：精煉數據
       - name: 📢 Trigger Alpha Data Lab Sync
         if: success()
         run: |
           DB_NAME="${{ matrix.market }}_stock_warehouse"
+          echo "🚀 市場 ${{ matrix.market }} 更新成功，正在遠端觸發精煉 $DB_NAME..."
           curl -X POST https://api.github.com/repos/grissomlin/Alpha-Data-Cleaning-Lab/dispatches \
           -H "Accept: application/vnd.github.v3+json" \
           -H "Authorization: bearer $GH_PAT" \
@@ -94,7 +97,7 @@ jobs:
           token = os.getenv('TELEGRAM_BOT_TOKEN')
           chat_id = os.getenv('TELEGRAM_CHAT_ID')
           market = '${{ matrix.market }}'.upper()
-          msg = f'❌ 【系統崩潰】市場: {market}\n原因：GitHub Actions 執行失敗。'
+          msg = f'❌ 【系統崩潰】市場: {market}\n原因：GitHub Actions 執行失敗，請檢查日誌。'
           if token and chat_id:
               requests.post(f'https://api.telegram.org/bot{token}/sendMessage', json={'chat_id': chat_id, 'text': msg})
           "
