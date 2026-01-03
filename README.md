@@ -2,6 +2,7 @@
 **全球股市特徵工程資料庫 | Global Stock Feature Engineering Pipeline**
 
 ---
+<img width="1860" height="777" alt="image" src="https://github.com/user-attachments/assets/6f24528d-43cd-4677-baa5-af5463570a76" />
 
 ## 📌 專案簡介（Project Overview）
 
@@ -97,6 +98,10 @@ It is designed as:
 - GitHub Actions scheduling
 - Google Drive database sync
 - Multi-market support (TW / US / HK)
+<img width="1886" height="836" alt="image" src="https://github.com/user-attachments/assets/fee9d5b2-d4b7-4438-835c-249d86615bcc" />
+<img width="1905" height="876" alt="image" src="https://github.com/user-attachments/assets/88c27239-716e-4320-bbbc-88664d6b715c" />
+<img width="1905" height="910" alt="image" src="https://github.com/user-attachments/assets/0fed5dbb-4087-445e-84f7-043d78d714a6" />
+<img width="1919" height="846" alt="image" src="https://github.com/user-attachments/assets/fd672e2b-9326-4792-b02c-e69a387b1251" />
 
 ---
 
