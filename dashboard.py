@@ -42,10 +42,11 @@ def download_file(service, file_id, file_name):
 
 # --- 3. 側邊欄：策略篩選條件 ---
 st.sidebar.header("📊 選股策略條件")
-# 💡 放在這裡：決定 TARGET_DB 的關鍵邏輯
+
+# 市場選擇
 market_options = {
     "台股 (TW)": "tw",
-    "美股 (US)": "us",
+    "美股 (US)": "us", 
     "陸股 (CN)": "cn",
     "港股 (HK)": "hk",
     "日股 (JP)": "jp",
@@ -54,22 +55,40 @@ market_options = {
 selected_market_label = st.sidebar.selectbox("選擇市場", list(market_options.keys()))
 market_code = market_options[selected_market_label]
 
-# 💡 動態設定資料庫名稱 (這行會覆蓋原本固定的 TARGET_DB)
+# 動態設定資料庫名稱
 TARGET_DB = f"{market_code}_stock_warehouse.db"
 
+# 基本條件
 year = st.sidebar.selectbox("選擇年份", [2024, 2025], index=1)
 month = st.sidebar.selectbox("選擇月份", list(range(1, 13)), index=0)
+
+# 技術指標策略
 strategy_type = st.sidebar.selectbox(
-    "技術指標策略", 
+    "1. 技術指標策略", 
     ["無", "KD 黃金交叉", "MACD 柱狀圖轉正", "均線多頭排列(MA20>MA60)"]
 )
+
+# 💡 B. 獨立的背離選單 (從資料庫欄位對應)
+divergence_type = st.sidebar.selectbox(
+    "2. 疊加背離條件 (必備特徵)",
+    ["不限", "MACD 底部背離", "KD 底部背離", "雙重背離 (MACD+KD)"]
+)
+
+# 評估期間
 reward_period = st.sidebar.selectbox("評估未來報酬區間", ["1-5", "6-10", "11-20"])
 up_col = f"up_{reward_period}"
 down_col = f"down_{reward_period}"
 
 # --- 4. 主標題 ---
 st.title("🌐 全球股市特徵引擎 - 策略篩選中心")
-st.markdown(f"**當前選擇市場:** {selected_market_label} | **分析時段:** {year}年{month}月 | **策略:** {strategy_type}")
+
+# 顯示當前篩選條件
+strategy_desc = "無" if strategy_type == "無" else strategy_type
+divergence_desc = "無" if divergence_type == "不限" else divergence_type
+st.markdown(f"""
+**當前選擇市場:** {selected_market_label} | **分析時段:** {year}年{month}月  
+**技術策略:** {strategy_desc} | **背離條件:** {divergence_desc} | **評估期間:** {reward_period}天
+""")
 
 # --- 5. 數據核心：讀取與過濾 ---
 service = get_gdrive_service()
@@ -99,7 +118,7 @@ if service:
                 all_potential_features = ['ma20_slope', 'ma60_slope', 'macdh_slope']
                 existing_features = [f for f in all_potential_features if f in df.columns]
 
-                # 執行過濾
+                # 執行技術指標過濾
                 if strategy_type == "KD 黃金交叉": 
                     df = df[df['kd_gold'] == 1]
                 elif strategy_type == "MACD 柱狀圖轉正": 
@@ -107,24 +126,51 @@ if service:
                 elif strategy_type == "均線多頭排列(MA20>MA60)": 
                     df = df[df['ma20'] > df['ma60']]
 
+                # 💡 新增：執行背離條件過濾
+                if divergence_type == "MACD 底部背離":
+                    if 'macd_bottom_div' in df.columns:
+                        df = df[df['macd_bottom_div'] == 1]
+                elif divergence_type == "KD 底部背離":
+                    if 'kd_bottom_div' in df.columns:
+                        df = df[df['kd_bottom_div'] == 1]
+                elif divergence_type == "雙重背離 (MACD+KD)":
+                    if 'macd_bottom_div' in df.columns and 'kd_bottom_div' in df.columns:
+                        df = df[(df['macd_bottom_div'] == 1) & (df['kd_bottom_div'] == 1)]
+
                 # 準備顯示用 DataFrame
                 def make_wantgoo_link(s): return f"https://www.wantgoo.com/stock/{str(s).split('.')[0]}/technical-chart"
                 
                 core_cols = ['date', 'symbol', 'close', 'ytd_ret', up_col, down_col]
                 available_show = [c for c in core_cols if c in df.columns] + existing_features
+                
+                # 如果選擇了背離條件，也顯示背離欄位
+                if divergence_type != "不限":
+                    if 'macd_bottom_div' in df.columns and 'kd_bottom_div' in df.columns:
+                        available_show += ['macd_bottom_div', 'kd_bottom_div']
+                
                 res_df = df[available_show].copy()
                 res_df['分析'] = res_df['symbol'].apply(make_wantgoo_link)
 
                 # 顯示表格
                 st.subheader(f"🚀 {year}年{month}月 符合訊號標的 (共 {len(df)} 筆)")
+                
+                # 設定欄位格式
+                column_config = {
+                    "ytd_ret": st.column_config.NumberColumn("YTD(%)", format="%.2f%%"),
+                    up_col: st.column_config.NumberColumn("未來漲幅", format="%.2f%%"),
+                    down_col: st.column_config.NumberColumn("未來跌幅", format="%.2f%%"),
+                    "分析": st.column_config.LinkColumn("玩股網", display_text="開圖"),
+                }
+                
+                # 如果有背離欄位，設定布林值顯示
+                if 'macd_bottom_div' in res_df.columns:
+                    column_config["macd_bottom_div"] = st.column_config.CheckboxColumn("MACD背離")
+                if 'kd_bottom_div' in res_df.columns:
+                    column_config["kd_bottom_div"] = st.column_config.CheckboxColumn("KD背離")
+                
                 st.data_editor(
                     res_df,
-                    column_config={
-                        "ytd_ret": st.column_config.NumberColumn("YTD(%)", format="%.2f%%"),
-                        up_col: st.column_config.NumberColumn("未來漲幅", format="%.2f%%"),
-                        down_col: st.column_config.NumberColumn("未來跌幅", format="%.2f%%"),
-                        "分析": st.column_config.LinkColumn("玩股網", display_text="開圖"),
-                    },
+                    column_config=column_config,
                     hide_index=True, use_container_width=True
                 )
             else:
@@ -192,17 +238,28 @@ if not res_df.empty:
         st.divider()
         st.subheader("🤖 AI 量化大師提示詞")
         
-        # 建立提示詞
+        # 建立提示詞（加入背離條件信息）
         csv_data = up_matrix.to_csv(index=False)
+        strategy_desc = "無" if strategy_type == "無" else strategy_type
+        divergence_desc = "無" if divergence_type == "不限" else divergence_type
+        
         prompt_text = f"""請分析這份漲幅特徵矩陣，找出高報酬分箱的斜率規律：
 
 {csv_data}
 
+分析背景：
+- 市場：{selected_market_label}
+- 技術策略：{strategy_desc}
+- 背離條件：{divergence_desc}
+- 評估期間：{reward_period}天
+- 樣本數：{len(res_df)}筆
+
 請提供以下分析：
 1. 找出哪個特徵在高報酬分箱中有明顯差異
-2. 建議具體的量化交易策略
+2. 結合技術策略({strategy_desc})和背離條件({divergence_desc})，建議具體的量化交易策略
 3. 預測此策略的風險與回報特性
-4. 提供可能的改進方向"""
+4. 提供可能的改進方向
+5. 分析背離條件是否對策略效果有顯著影響"""
 
         # 顯示提示詞框
         st.code(prompt_text, language="markdown")
@@ -253,18 +310,29 @@ with st.expander("💡 什麼是「特徵欄位分析」？"):
     ```
     * 目的：捕捉中期動能方向
     * 應用：判斷趨勢是否加速或減速
+    
     **2. 動能型特徵**
     ```
     MACD柱狀圖斜率 = 最近N根K線MACD柱狀圖的線性回歸斜率
     ```
     * 目的：衡量動能變化率
     * 應用：預測技術指標是否即將轉向
+    
     **3. 擺盪型特徵**
     ```
     KD位置 = (今日K值 - 20) / (80 - 20) × 100%
     ```
     * 目的：識別超買超賣極端值
     * 應用：反轉點位預測
+    
+    **4. 背離型特徵**
+    ```
+    MACD底部背離 = 價格創新低但MACD未創新低
+    KD底部背離 = 價格創新低但KD未創新低
+    ```
+    * 目的：識別潛在的反轉信號
+    * 應用：尋找買入時機
+    
     ---
     ### 🧬 為什麼看斜率而不只看價格？
     | 指標 | 比喻 | 關鍵洞察 |
@@ -272,6 +340,8 @@ with st.expander("💡 什麼是「特徵欄位分析」？"):
     | **MA20斜率** | 車子的「瞬時時速」 | 斜率越高，衝刺力越強，短期動能越充足 |
     | **MA60斜率** | 跑道的「長緩坡」 | 正值代表順風（多頭環境），勝率天生較高 |
     | **MACD加速度** | 油門踩下去的「深度」 | 轉正代表買盤動能正在爆發，非短暫反彈 |
+    | **背離信號** | 雷達的「異常警示」 | 價格與指標不同步，預示潛在轉折點 |
+    
     ---  
     ### 📊 統計數據的解碼藝術  
     **偏度 (Skewness) - 「暴發戶指數」**
@@ -280,6 +350,7 @@ with st.expander("💡 什麼是「特徵欄位分析」？"):
     負偏度 < 0：左尾較長 → 這組股票可能有地雷股
     ```
     * **實戰意義**：正偏度越高的策略，代表有機會抓到「十倍股」
+    
     **峰度 (Kurtosis) - 「一致性指數」**
     ```
     高峰度 > 3：分布集中 → 選股結果穩定可預測
@@ -288,23 +359,23 @@ with st.expander("💡 什麼是「特徵欄位分析」？"):
     * **實戰意義**：高峰度的策略代表每次執行結果相似，適合資金配置    
     ---
     ### 🚀 實戰應用：三層過濾法則
-    1. **第一層：特徵篩選**
+    1. **第一層：趨勢篩選**
     ```
     IF MA20斜率 > 0.5 AND MA60斜率 > 0.2 THEN 進入觀察名單
     ```
-    2. **第二層：統計驗證**
+    2. **第二層：背離確認**
     ```
-    IF 偏度 > 1.0 AND 峰度 > 3.5 THEN 列為核心持股
+    IF MACD底部背離 = 1 OR KD底部背離 = 1 THEN 列為候選標的
     ```
     3. **第三層：動態調整**
     ```
-    根據市場狀態，調整特徵權重（牛市重斜率，熊市重防禦）
+    根據市場狀態，調整特徵權重（牛市重斜率，熊市重背離）
     ```    
     --- 
     ### 💡 進階思考：特徵交互作用
     真正賺錢的秘密往往不在單一特徵，而在**特徵之間的交互作用**：
     ```
-    黃金組合 = MA20斜率↑ + MACD柱狀圖斜率轉正 + 成交量放大
+    黃金組合 = MA20斜率↑ + MACD柱狀圖斜率轉正 + MACD底部背離
     死亡組合 = MA20斜率↓ + MACD柱狀圖斜率轉負 + 量價背離
     ```
     本儀表板的統計矩陣功能，正是幫助您挖掘這些隱藏的「特徵化學反應」！
