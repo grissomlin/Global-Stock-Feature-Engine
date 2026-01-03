@@ -193,13 +193,32 @@ def main():
 
 if __name__ == "__main__":
     main()
-# --- 在 main.py 的最後加入 ---
+
+# --- 在 main.py 的最後修改 ---
 if all_summaries:
-    print("🌍 正在生成全球市場特徵摘要...")
-    with open("global_summary.json", "w", encoding="utf-8") as f:
+    print("\n🌍 正在生成全球市場特徵摘要...")
+    json_file = "global_summary.json"
+    
+    # 1. 儲存本地 JSON
+    with open(json_file, "w", encoding="utf-8") as f:
         json.dump(all_summaries, f, ensure_ascii=False, indent=4)
     
-    # 如果有 service，也同步傳一份到 Google Drive
+    # 2. 如果有 service，同步上傳到 Google Drive (讓 Dashboard 能讀取)
     if service:
-        # 這裡可以寫一個簡單的 upload 邏輯將 json 傳上去
-        pass
+        print(f"📡 正在同步 {json_file} 至雲端...")
+        # 借用現有的 upload_db_to_drive 邏輯，但修改 mimetype
+        media = MediaFileUpload(json_file, mimetype='application/json', resumable=True)
+        query = f"name = '{json_file}' and '{GDRIVE_FOLDER_ID}' in parents and trashed = false"
+        
+        try:
+            results = service.files().list(q=query, fields="files(id)").execute()
+            items = results.get('files', [])
+            if items:
+                service.files().update(fileId=items[0]['id'], media_body=media).execute()
+            else:
+                meta = {'name': json_file, 'parents': [GDRIVE_FOLDER_ID]}
+                service.files().create(body=meta, media_body=media).execute()
+            print(f"✅ 全球摘要上傳成功！")
+        except Exception as e:
+            print(f"❌ 全球摘要上傳失敗: {e}")pass
+
