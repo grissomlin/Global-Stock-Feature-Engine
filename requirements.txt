@@ -35,3 +35,15 @@ resend
 pyarrow
 # 如果有用到資料庫 ORM
 peewee
+# --- 7. 儀表板與視覺化 ---
+streamlit           # 💡 儀表板核心
+plotly              # 💡 畫 K 線圖或報酬分佈圖非常有用
+scipy               # 💡 processor.py 做統計分析或進階清洗時可能會用到
+
+# --- 8. 數據庫與 SQL 優化 ---
+sqlalchemy          # 💡 你之前用來對帳連線 Supabase 的核心庫
+psycopg2-binary     # 💡 如果要連線 PostgreSQL (如 Supabase) 必備
+
+# --- 9. 其他輔助 ---
+beautifulsoup4      # 💡 雖然有 lxml，但 bs4 對爬蟲更友善
+typing-extensions   # 💡 解決 Python 版本間類型註釋的相容性問題
