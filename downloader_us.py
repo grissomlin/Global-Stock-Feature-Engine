@@ -4,7 +4,7 @@ downloader_us.py
 ----------------
 美股資料下載器（穩定單執行緒版）
 
-✔ 廢棄批量請求：改用單檔循環下載，徹底解決記憶體錯亂問題
+✔ 支援外部日期參數：可由 main.py 指定下載區間
 ✔ 精準過濾：自動剔除 Warrant, ETF, Preferred 等衍生品
 ✔ 結構對齊：完全支援全局自動化連動機制
 """
@@ -93,21 +93,20 @@ def get_us_stock_list_official():
         log(f"❌ 獲取名單失敗: {e}")
         return []
 
-# ========== 4. 下載核心 (單執行緒穩定版) ==========
-def download_one_us(symbol, mode):
-    start_date = "2023-01-01" if mode == 'hot' else "2010-01-01"
+# ========== 4. 下載核心 (支援傳入日期) ==========
+def download_one_us(symbol, start_date, end_date):
+    """
+    從 Yahoo Finance 下載特定區間的資料
+    """
     max_retries = 1
     
     for attempt in range(max_retries + 1):
         try:
-            # 💡 核心修正：threads=False 確保單線程穩定性
-            df = yf.download(symbol, start=start_date, progress=False, 
+            # 💡 使用從 run_sync 傳來的 start_date 與 end_date
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False, 
                              auto_adjust=True, threads=False, timeout=30)
             
             if df is None or df.empty:
-                if attempt < max_retries:
-                    time.sleep(2)
-                    continue
                 return None
             
             if isinstance(df.columns, pd.MultiIndex):
@@ -130,8 +129,11 @@ def download_one_us(symbol, mode):
                 continue
             return None
 
-# ========== 5. 主流程 ==========
-def run_sync(mode='hot'):
+# ========== 5. 主流程 (對齊 main.py 的呼叫介面) ==========
+def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
+    """
+    接收 main.py 傳送來的日期參數
+    """
     start_time = time.time()
     init_db()
     
@@ -139,15 +141,16 @@ def run_sync(mode='hot'):
     if not items:
         return {"success": 0, "has_changed": False}
 
-    log(f"🚀 開始美股同步 (安全模式) | 目標: {len(items)} 檔")
+    log(f"🚀 開始美股同步 | 區間: {start_date} ~ {end_date} | 目標: {len(items)} 檔")
 
     success_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
     
-    # 💡 採用單執行緒循環下載
+    # 採用單執行緒循環下載
     pbar = tqdm(items, desc="US同步")
     for symbol, name in pbar:
-        df_res = download_one_us(symbol, mode)
+        # 將日期參數傳遞給下載核心
+        df_res = download_one_us(symbol, start_date, end_date)
         
         if df_res is not None:
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
@@ -155,12 +158,11 @@ def run_sync(mode='hot'):
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
             
-        # 🟢 加入極小延遲，確保不會被 Yahoo Finance 判定為 DDoS 攻擊
-        time.sleep(0.02)
+        # 極小延遲，避免 API 頻率限制
+        time.sleep(0.01)
     
     conn.commit()
     
-    # 統計與維護
     log("🧹 執行資料庫 VACUUM...")
     conn.execute("VACUUM")
     db_info_count = conn.execute("SELECT COUNT(DISTINCT symbol) FROM stock_info").fetchone()[0]
@@ -177,5 +179,5 @@ def run_sync(mode='hot'):
     }
 
 if __name__ == "__main__":
-    run_sync(mode='hot')
-
+    # 手動執行時預設下載近期資料
+    run_sync(start_date="2024-01-01", end_date=datetime.now().strftime("%Y-%m-%d"))
