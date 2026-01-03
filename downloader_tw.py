@@ -27,28 +27,24 @@ def init_db():
     finally:
         conn.close()
 
-# ========== 3. 獲取台股清單 (完整網址，過濾邏輯) ==========
+# ========== 3. 獲取台股清單 (維持原樣) ==========
 def get_tw_stock_list():
     url_configs = [
-    {'name': 'listed', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=1&issuetype=1&Page=1&chklike=Y', 'suffix': '.TW'},
-    {'name': 'dr', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=J&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
-    {'name': 'otc', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=2&issuetype=4&Page=1&chklike=Y', 'suffix': '.TWO'},
-    {'name': 'etf', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=I&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
-    {'name': 'rotc', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=E&issuetype=R&industry_code=&Page=1&chklike=Y', 'suffix': '.TWO'},
-    {'name': 'tw_innovation', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=C&issuetype=C&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
-    {'name': 'otc_innovation', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=A&issuetype=C&industry_code=&Page=1&chklike=Y', 'suffix': '.TWO'},
-]
-
+        {'name': 'listed', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=1&issuetype=1&Page=1&chklike=Y', 'suffix': '.TW'},
+        {'name': 'dr', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=J&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
+        {'name': 'otc', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=2&issuetype=4&Page=1&chklike=Y', 'suffix': '.TWO'},
+        {'name': 'etf', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=I&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
+        {'name': 'rotc', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=E&issuetype=R&industry_code=&Page=1&chklike=Y', 'suffix': '.TWO'},
+        {'name': 'tw_innovation', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=C&issuetype=C&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
+        {'name': 'otc_innovation', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=A&issuetype=C&industry_code=&Page=1&chklike=Y', 'suffix': '.TWO'},
+    ]
     
     log(f"📡 獲取台股清單 (自動跳過權證分類)...")
     conn = sqlite3.connect(DB_PATH)
     stock_list = []
     
     for cfg in url_configs:
-        # 💡 核心過濾：如果名稱包含 'warrant'，直接跳過不解析、不存入資料庫
-        if 'warrant' in cfg['name']:
-            log(f"⏭️  跳過分類: {cfg['name']}")
-            continue
+        if 'warrant' in cfg['name']: continue
             
         try:
             resp = requests.get(cfg['url'], timeout=15)
@@ -75,12 +71,11 @@ def get_tw_stock_list():
     conn.close()
     return list(set(stock_list))
 
-# ========== 4. 下載邏輯 (單執行緒穩定版) ==========
-def download_one_stable(symbol, mode):
-    start_date = "2023-01-01" if mode == 'hot' else "1993-01-04"
+# ========== 4. 下載邏輯 (修改為接受外部日期) ==========
+def download_one_stable(symbol, start_date, end_date):
     try:
-        # 強制單執行緒，防止記憶體污染
-        df = yf.download(symbol, start=start_date, progress=False, timeout=20, 
+        # 直接使用傳入的 start_date 與 end_date
+        df = yf.download(symbol, start=start_date, end=end_date, progress=False, timeout=20, 
                          auto_adjust=True, threads=False)
         if df is None or df.empty: return None
         
@@ -90,35 +85,40 @@ def download_one_stable(symbol, mode):
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
+        
+        # 建立最終輸出表
         df_final = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
         df_final['symbol'] = symbol
         return df_final
     except:
         return None
 
-# ========== 5. 主流程 ==========
-def run_sync(mode='hot'):
+# ========== 5. 主流程 (由 main.py 統一指揮) ==========
+def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
     start_time = time.time()
     init_db()
     
     items = get_tw_stock_list()
     if not items:
         log("❌ 無法獲取股票清單")
-        return {"success": 0, "has_changed": False}
+        return {"success": 0, "total": 0}
 
-    log(f"🚀 開始同步 TW | 排除權證後剩餘: {len(items)} 檔 | 模式: {mode}")
+    log(f"🚀 開始同步 TW | 目標: {len(items)} 檔 | 區間: {start_date} ~ {end_date}")
 
     success_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
     
     pbar = tqdm(items, desc="TW同步")
     for symbol, name in pbar:
-        df_res = download_one_stable(symbol, mode)
+        # 傳入指定日期
+        df_res = download_one_stable(symbol, start_date, end_date)
         if df_res is not None:
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
                           method=lambda table, conn, keys, data_iter: 
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
+        
+        # 這裡的微小延遲是為了避免被 Yahoo 封鎖單一機器的 IP
         time.sleep(0.05)
     
     conn.commit()
@@ -127,10 +127,10 @@ def run_sync(mode='hot'):
     conn.close()
 
     duration = (time.time() - start_time) / 60
-    log(f"📊 同步完成！更新成功: {success_count} / {len(items)} | 耗時: {duration:.1f} 分鐘")
+    log(f"📊 同步完成！成功: {success_count} / {len(items)} | 耗時: {duration:.1f} 分鐘")
     
     return {"success": success_count, "total": len(items)}
 
 if __name__ == "__main__":
-    run_sync(mode='hot')
-
+    # 若直接執行此檔案，預設抓取 2024-2025
+    run_sync()
