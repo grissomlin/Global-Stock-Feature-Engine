@@ -147,29 +147,53 @@ if service:
             df = pd.read_sql(f"SELECT * FROM stock_analysis WHERE date BETWEEN '{start_date}' AND '{end_date}'", conn)
             conn.close()
 
+            # --- 5. 數據核心：讀取與過濾 ---
+            # ... (讀取資料庫 df 之後)    
             if not df.empty:
-                # 偵測特徵欄位是否存在
-                all_potential_features = ['ma20_slope', 'ma60_slope', 'macdh_slope']
-                existing_features = [f for f in all_potential_features if f in df.columns]
-
-                # 執行技術指標過濾
+                # 🛠️ 執行技術指標過濾 (這是當天的訊號)
                 if strategy_type == "KD 黃金交叉": 
                     df = df[df['kd_gold'] == 1]
                 elif strategy_type == "MACD 柱狀圖轉正": 
                     if 'macdh_slope' in df.columns: df = df[df['macdh_slope'] > 0]
                 elif strategy_type == "均線多頭排列(MA20>MA60)": 
                     df = df[df['ma20'] > df['ma60']]
-
-                # 💡 新增：執行背離條件過濾
-                if divergence_type == "MACD 底部背離":
-                    if 'macd_bottom_div' in df.columns:
-                        df = df[df['macd_bottom_div'] == 1]
-                elif divergence_type == "KD 底部背離":
-                    if 'kd_bottom_div' in df.columns:
-                        df = df[df['kd_bottom_div'] == 1]
-                elif divergence_type == "雙重背離 (MACD+KD)":
-                    if 'macd_bottom_div' in df.columns and 'kd_bottom_div' in df.columns:
-                        df = df[(df['macd_bottom_div'] == 1) & (df['kd_bottom_div'] == 1)]
+            
+                # 🛠️ 執行「背離追蹤天數」過濾 (滾動檢查)
+                if divergence_type != "不限":
+                    # 根據選擇的類型決定檢查哪些欄位
+                    check_cols = []
+                    if divergence_type in ["MACD 底部背離", "雙重背離 (MACD+KD)"]:
+                        check_cols.append('macd_bottom_div')
+                    if divergence_type in ["KD 底部背離", "雙重背離 (MACD+KD)"]:
+                        check_cols.append('kd_bottom_div')
+            
+                    if all(col in df.columns for col in check_cols):
+                        # 💡 這裡使用 GroupBy + Rolling 來檢查過去幾天內是否有過 '1'
+                        # 由於我們讀取的 df 是當月資料，若要精準檢查，資料庫讀取範圍應稍微往前多抓幾天
+                        # 簡化版邏輯：直接過濾當前 df 中符合條件的
+                        
+                        def check_recent_div(row, full_df, lookback, cols):
+                            # 找出同一支股票，日期在當前日期之前的資料
+                            target_symbol = row['symbol']
+                            current_date = row['date']
+                            
+                            # 獲取該股歷史窗口資料
+                            history = full_df[full_df['symbol'] == target_symbol]
+                            recent_history = history[history['date'] <= current_date].tail(lookback + 1)
+                            
+                            if divergence_type == "雙重背離 (MACD+KD)":
+                                # 雙重背離要求分開看：MACD 在窗口內有過，且 KD 在窗口內也有過
+                                has_macd = recent_history['macd_bottom_div'].max() == 1
+                                has_kd = recent_history['kd_bottom_div'].max() == 1
+                                return has_macd and has_kd
+                            else:
+                                # 單一背離：窗口內任何一列有 1 即可
+                                return recent_history[cols].max().max() == 1
+            
+                        # 執行過濾 (這會比較耗時，大數據量時建議優化)
+                        with st.spinner("🔍 正在追蹤背離歷史窗口..."):
+                            mask = df.apply(check_recent_div, axis=1, args=(df, lookback_days, check_cols))
+                            df = df[mask]
 
                 # 準備顯示用 DataFrame
                 def make_wantgoo_link(s): return f"https://www.wantgoo.com/stock/{str(s).split('.')[0]}/technical-chart"
