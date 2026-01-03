@@ -7,7 +7,7 @@ from googleapiclient.http import MediaIoBaseDownload
 
 st.set_page_config(page_title="全球股市特徵引擎", layout="wide")
 
-# --- 1. 固定變數定義 (防止 NameError) ---
+# --- 1. 固定變數定義 ---
 TARGET_DB = "tw_stock_warehouse.db"
 
 # --- 2. Google Drive 服務初始化 ---
@@ -38,7 +38,7 @@ def download_file(service, file_id, file_name):
 # --- 3. 側邊欄：策略篩選條件 ---
 st.sidebar.header("📊 選股策略條件")
 
-# A. 年份與月份 (限定 2025 到 11月)
+# A. 年份與月份
 year = st.sidebar.selectbox("選擇年份", [2024, 2025], index=1)
 if year == 2025:
     month = st.sidebar.selectbox("選擇月份", list(range(1, 12)), index=0)
@@ -51,13 +51,15 @@ strategy_type = st.sidebar.selectbox(
     ["無", "KD 黃金交叉", "MACD 柱狀圖轉正", "均線多頭排列(MA20>MA60)"]
 )
 
-# C. 未來報酬目標
-reward_target = st.sidebar.selectbox(
+# C. 未來報酬評估區間 (連動 up 與 down 欄位)
+reward_period = st.sidebar.selectbox(
     "評估未來報酬區間", 
-    ["up_1-5", "up_6-10", "up_11-20"]
+    ["1-5", "6-10", "11-20"]
 )
+up_col = f"up_{reward_period}"
+down_col = f"down_{reward_period}"
 
-# D. 背離條件 (可選)
+# D. 背離條件
 use_divergence = st.sidebar.checkbox("開啟底部背離過濾")
 div_type = "無"
 if use_divergence:
@@ -69,7 +71,6 @@ st.title("🌐 全球股市特徵引擎 - 策略篩選中心")
 service = get_gdrive_service()
 
 if service:
-    # 確保資料庫存在
     if not os.path.exists(TARGET_DB):
         folder_id = st.secrets["GDRIVE_FOLDER_ID"]
         query = f"'{folder_id}' in parents and name = '{TARGET_DB}' and trashed = false"
@@ -80,15 +81,15 @@ if service:
         else:
             st.error(f"❌ 雲端找不到 {TARGET_DB}")
 
-    # 開始查詢數據
     if os.path.exists(TARGET_DB):
         try:
             conn = sqlite3.connect(TARGET_DB)
             
-            # 建立 SQL 查詢 (動態日期)
+            # 建立 SQL 查詢
             start_date = f"{year}-{month:02d}-01"
             end_date = f"{year}-{month:02d}-31"
             
+            # 💡 注意：確保讀取了 ytd_ret 欄位
             query = f"SELECT * FROM stock_analysis WHERE date BETWEEN '{start_date}' AND '{end_date}'"
             df = pd.read_sql(query, conn)
             conn.close()
@@ -115,22 +116,33 @@ if service:
                     clean_id = str(symbol).split('.')[0]
                     return f"https://www.wantgoo.com/stock/{clean_id}/technical-chart"
 
-                # 整理顯示欄位
-                res_df = df[['date', 'symbol', 'close', 'ma20_slope', reward_target]].copy()
-                res_df['玩股網'] = res_df['symbol'].apply(make_wantgoo_link)
+                # 整理顯示欄位：同時顯示 YTD, 最大漲幅, 最大跌幅
+                cols_to_show = ['date', 'symbol', 'close', 'ytd_ret', up_col, down_col]
+                # 檢查欄位是否存在 (防止資料庫尚未更新)
+                available_cols = [c for c in cols_to_show if c in df.columns]
+                
+                res_df = df[available_cols].copy()
+                res_df['分析'] = res_df['symbol'].apply(make_wantgoo_link)
 
-                # 使用 Data Editor 顯示超連結
+                # 使用 Data Editor 顯示
                 st.data_editor(
                     res_df,
                     column_config={
-                        "玩股網": st.column_config.LinkColumn("查看線圖", display_text="點我開圖"),
+                        "分析": st.column_config.LinkColumn("玩股網", display_text="開圖"),
                         "close": st.column_config.NumberColumn("收盤價", format="%.2f"),
-                        "ma20_slope": st.column_config.NumberColumn("MA20斜率", format="%.4f"),
-                        reward_target: st.column_config.ProgressColumn("未來報酬", format="%.2f", min_value=-0.2, max_value=0.2)
+                        "ytd_ret": st.column_config.NumberColumn("YTD 實測漲幅 (%)", format="%.2f%%"),
+                        up_col: st.column_config.NumberColumn(f"區間最大漲幅 (%)", format="%.2f%%"),
+                        down_col: st.column_config.NumberColumn(f"區間最大跌幅 (%)", format="%.2f%%"),
                     },
                     hide_index=True,
                     use_container_width=True
                 )
+                
+                # 💡 額外統計：平均預期報酬
+                avg_up = res_df[up_col].mean()
+                avg_down = res_df[down_col].mean()
+                st.info(f"💡 本次篩選平均表現：最大潛在漲幅 {avg_up:.2f}% | 最大潛在跌幅 {avg_down:.2f}%")
+                
             else:
                 st.info("💡 此條件下查無資料，請放寬篩選標準。")
 
