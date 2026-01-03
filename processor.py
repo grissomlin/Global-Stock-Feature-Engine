@@ -32,7 +32,9 @@ def process_market_data(db_path):
         # --- A. 指標計算 (MA, MACD, KD) ---
         group['ma20'] = group['close'].rolling(window=20).mean()
         group['ma60'] = group['close'].rolling(window=60).mean()
-        group['ma20_slope'] = (group['ma20'].diff(3) / 3)
+        group['ma20_slope'] = (group['ma20'].diff(3) / 3).round(4) # 補上 round
+        group['ma60_slope'] = (group['ma60'].diff(3) / 3).round(4)
+        
         # --- 增加特徵斜率計算 ---
         group['ma60_slope'] = (group['ma60'].diff(3) / 3).round(4)
         ema12 = group['close'].ewm(span=12, adjust=False).mean()
