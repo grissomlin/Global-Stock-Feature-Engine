@@ -459,19 +459,19 @@ st.markdown("""
         <tr>
             <td style="text-align: center; vertical-align: top;">
                 <div style="font-size: 1.5em;">🛠️</div>
-                <a href="https://vocus.cc/article/695636c3fd89780001d873bd" target="_blank" style="text-decoration: none;">
+                <a href="https://vocus.cc/article/6959a592fd89780001295ad1" target="_blank" style="text-decoration: none;">
                     <b>⚙️ 環境與 AI 設定教學</b>
                 </a>
             </td>
             <td style="text-align: center; vertical-align: top;">
                 <div style="font-size: 1.5em;">📊</div>
-                <a href="https://vocus.cc/salon/grissomlin/room/695636ee0c0c0689d1e2aa9f" target="_blank" style="text-decoration: none;">
+                <a href="https://vocus.cc/article/6959a091fd8978000128b592" target="_blank" style="text-decoration: none;">
                     <b>📖 儀表板功能詳解</b>
                 </a>
             </td>
             <td style="text-align: center; vertical-align: top;">
                 <div style="font-size: 1.5em;">🐙</div>
-                <a href="https://github.com/grissomlin/StockRevenueLab" target="_blank" style="text-decoration: none;">
+                <a href="https://github.com/grissomlin/Global-Stock-Feature-Engine" target="_blank" style="text-decoration: none;">
                     <b>💻 GitHub 專案原始碼</b>
                 </a>
             </td>
