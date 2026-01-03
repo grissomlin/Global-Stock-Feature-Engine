@@ -42,6 +42,21 @@ def download_file(service, file_id, file_name):
 
 # --- 3. 側邊欄：策略篩選條件 ---
 st.sidebar.header("📊 選股策略條件")
+# 💡 放在這裡：決定 TARGET_DB 的關鍵邏輯
+market_options = {
+    "台股 (TW)": "tw",
+    "美股 (US)": "us",
+    "陸股 (CN)": "cn",
+    "港股 (HK)": "hk",
+    "日股 (JP)": "jp",
+    "韓股 (KR)": "kr"
+}
+selected_market_label = st.sidebar.selectbox("選擇市場", list(market_options.keys()))
+market_code = market_options[selected_market_label]
+
+# 💡 動態設定資料庫名稱 (這行會覆蓋原本固定的 TARGET_DB)
+TARGET_DB = f"{market_code}_stock_warehouse.db"
+
 year = st.sidebar.selectbox("選擇年份", [2024, 2025], index=1)
 month = st.sidebar.selectbox("選擇月份", list(range(1, 13)), index=0)
 strategy_type = st.sidebar.selectbox(
