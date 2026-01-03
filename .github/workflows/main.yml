@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       market:
-        description: '選擇要執行的市場'
+        description: '選擇要執行的市場 (Select Market)'
         required: true
-        default: 'tw'
+        default: 'all'
         type: choice
         options:
           - all
@@ -17,7 +17,7 @@ on:
           - jp
           - kr
   schedule:
-    - cron: '0 6 * * 1-5' # 台北時間 14:00 自動跑全部
+    - cron: '0 6 * * 1-5' # 台北時間 14:00 自動執行全部市場
 
 jobs:
   run-market-sync:
@@ -29,6 +29,7 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GDRIVE_SERVICE_ACCOUNT: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
       GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+      # 如果 main.py 內有用到環境變數讀取，請確保這裡有對應
 
     steps:
       - name: Checkout Code
@@ -43,29 +44,44 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy yfinance tqdm python-dotenv sqlite3 scipy
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
-          # 若有 pykrx (韓股需用到) 或其他套件也請加入
-          pip install pykrx
+          # 💡 修正：移除 sqlite3 (內建庫不可 pip install)
+          if [ -f requirements.txt ]; then 
+            pip install -r requirements.txt
+          else
+            pip install pandas numpy yfinance tqdm python-dotenv scipy requests lxml
+            pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib
+            pip install pykrx finance-datareader akshare
+          fi
 
       - name: Run Market Update
         run: |
-          # 判斷是手動輸入還是排程觸發
+          # 取得手動選擇或預設值
           TARGET_MARKET="${{ github.event.inputs.market }}"
-          if [ -z "$TARGET_MARKET" ]; then TARGET_MARKET="all"; fi
           
-          echo "🚀 執行目標: $TARGET_MARKET"
+          # 如果是 schedule (定時任務) 觸發，TARGET_MARKET 會是空的，強制設為 all
+          if [ -z "$TARGET_MARKET" ]; then 
+            TARGET_MARKET="all"
+          fi
+          
+          echo "🌍 執行目標市場: $TARGET_MARKET"
           
           if [ "$TARGET_MARKET" == "all" ]; then
+            # 執行全部 (main.py 不帶參數預設跑全部)
             python -u main.py
           else
+            # 執行單一市場 (例如: python main.py tw)
             python -u main.py $TARGET_MARKET
           fi
 
       - name: Upload Database Artifact
-        if: success()
+        if: always() # 即使部分成功也上傳，方便檢查檔案
         uses: actions/upload-artifact@v4
         with:
-          name: stock-databases
+          name: stock-databases-${{ github.run_id }}
           path: "*.db"
           retention-days: 3
+
+      - name: Notify Failure
+        if: failure()
+        run: |
+          echo "❌ 市場同步失敗，請檢查 Log！"
