@@ -1,98 +1,69 @@
 import streamlit as st
+import os
+import json
 import sqlite3
 import pandas as pd
-import os
-from datetime import datetime
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 
-st.set_page_config(page_title="Global Stock Feature Engine", layout="wide")
+st.title("🌐 全球股市特徵引擎 - 系統診斷")
 
-def get_all_db_files():
-    """尋找目錄下所有的資料庫檔案"""
-    return [f for f in os.listdir('.') if f.endswith('_stock_warehouse.db')]
+# --- 診斷步驟 ---
+def run_diagnostics():
+    st.header("🔍 系統連線診斷")
+    
+    # 步驟 1: 檢查 Secrets 是否存在
+    if "GDRIVE_SERVICE_ACCOUNT" not in st.secrets or "GDRIVE_FOLDER_ID" not in st.secrets:
+        st.error("❌ 診斷失敗: Streamlit Secrets 中缺少必要變數 (GDRIVE_SERVICE_ACCOUNT 或 GDRIVE_FOLDER_ID)")
+        return None, None
 
-def get_db_metadata(db_name):
-    """取得資料庫的統計資訊"""
+    # 步驟 2: 嘗試初始化 Google Drive 服務
     try:
-        conn = sqlite3.connect(db_name)
-        # 檢查是否有加工後的表格
-        tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)
-        has_analysis = 'stock_analysis' in tables['name'].values
-        target_table = 'stock_analysis' if has_analysis else 'stock_prices'
-        
-        df_stats = pd.read_sql(f"""
-            SELECT 
-                COUNT(DISTINCT symbol) as total_symbols,
-                MIN(date) as start_date,
-                MAX(date) as end_date,
-                COUNT(*) as total_rows
-            FROM {target_table}
-        """, conn)
-        
-        # 取得欄位名稱以供參考
-        columns = pd.read_sql(f"PRAGMA table_info({target_table})", conn)['name'].tolist()
-        conn.close()
-        
-        return {
-            "db": db_name,
-            "table": target_table,
-            "symbols": df_stats['total_symbols'][0],
-            "start": df_stats['start_date'][0],
-            "end": df_stats['end_date'][0],
-            "rows": df_stats['total_rows'][0],
-            "columns": columns
-        }
+        info = json.loads(st.secrets["GDRIVE_SERVICE_ACCOUNT"])
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        service = build('drive', 'v3', credentials=creds)
+        st.success("✅ Google Drive 服務初始化成功 (金鑰有效)")
     except Exception as e:
-        return {"db": db_name, "error": str(e)}
+        st.error(f"❌ 診斷失敗: 無法驗證 Google 憑證。原因: {e}")
+        return None, None
 
-# --- UI 介面 ---
-st.title("🌐 全球股市特徵引擎 - 資料庫檢查儀表板")
+    # 步驟 3: 嘗試列出資料夾內容
+    folder_id = st.secrets["GDRIVE_FOLDER_ID"]
+    try:
+        query = f"'{folder_id}' in parents and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        files = results.get('files', [])
+        
+        if not files:
+            st.warning(f"⚠️ 警告: 連線成功，但該資料夾 (ID: {folder_id}) 是空的，或者裡面沒有任何檔案。")
+            return service, []
+        
+        # 過濾出資料庫檔案
+        db_files = [f for f in files if f['name'].endswith('_stock_warehouse.db')]
+        if not db_files:
+            st.warning(f"⚠️ 警告: 資料夾內有 {len(files)} 個檔案，但沒有任何以 '_stock_warehouse.db' 結尾的資料庫檔案。")
+            st.write("資料夾內的檔案清單：", [f['name'] for f in files])
+        else:
+            st.success(f"✅ 成功找到 {len(db_files)}個資料庫檔案！")
+            
+        return service, db_files
 
-db_files = get_all_db_files()
+    except Exception as e:
+        st.error(f"❌ 診斷失敗: 無法存取資料夾。請檢查 Folder ID 是否正確，以及該資料夾是否有分享給 Service Account。")
+        st.info(f"您的 Service Account Email 為: {info.get('client_email')}")
+        return None, None
 
-if not db_files:
-    st.warning("❌ 找不到任何 *_stock_warehouse.db 檔案，請確認檔案已下載至本地。")
-else:
-    # 1. 總覽區
-    st.header("📊 資料庫健康度掃描")
-    meta_data = []
-    for db in db_files:
-        meta_data.append(get_db_metadata(db))
-    
-    df_meta = pd.DataFrame(meta_data)
-    st.table(df_meta[['db', 'table', 'symbols', 'start', 'end', 'rows']])
+# 執行診斷並取得檔案清單
+service, online_db_list = run_diagnostics()
 
-    # 2. 詳細欄位與數據預覽
+# --- 如果有檔案，提供下載按鈕 ---
+if online_db_list:
     st.divider()
-    selected_db = st.selectbox("選擇要檢視的資料庫", db_files)
+    st.subheader("📥 雲端檔案同步")
+    selected_to_download = st.multiselect("選擇要下載到儀表板環境的檔案", [f['name'] for f in online_db_list])
     
-    if selected_db:
-        curr_meta = next(item for item in meta_data if item["db"] == selected_db)
-        
-        col1, col2 = st.columns([1, 3])
-        
-        with col1:
-            st.subheader("📋 欄位清單 (Features)")
-            st.write(curr_meta['columns'])
-        
-        with col2:
-            st.subheader("🔍 數據抽樣 (Top 100)")
-            conn = sqlite3.connect(selected_db)
-            # 優先展示具有特徵的數據
-            df_preview = pd.read_sql(f"SELECT * FROM {curr_meta['table']} LIMIT 100", conn)
-            st.dataframe(df_preview, use_container_width=True)
-            
-            # 特徵分佈快速檢查
-            if 'macdh_slope' in df_preview.columns:
-                st.subheader("📈 指標變動檢查 (示例：MACD 斜率)")
-                st.line_chart(df_preview.set_index('date')['macdh_slope'].head(50))
-            
-            conn.close()
-
-    # 3. 異常檢索 (選配)
-    with st.expander("🛠️ 進階檢查：搜尋特定標的"):
-        search_symbol = st.text_input("輸入標的代號 (例如: 2330.TW)", "")
-        if search_symbol and selected_db:
-            conn = sqlite3.connect(selected_db)
-            res = pd.read_sql(f"SELECT * FROM {curr_meta['table']} WHERE symbol = '{search_symbol}' ORDER BY date DESC LIMIT 20", conn)
-            st.write(res)
-            conn.close()
+    if st.button("開始下載檔案"):
+        # 這裡放入你之前的 download_db_from_drive 邏輯
+        st.info("下載功能執行中...")
