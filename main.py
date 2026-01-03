@@ -143,7 +143,11 @@ def main():
         if summary:
             all_summaries.append(summary)
             print(f"📊 摘要: {summary['market']} | 涵蓋率: {summary['coverage']} | 最後日期: {summary['end_date']}")
-
+            # 💡 新增：生成該市場的獨立摘要文件
+            market_summary_file = f"summary_{m}.json"
+            with open(market_summary_file, "w", encoding="utf-8") as f:
+                json.dump(summary, f, ensure_ascii=False, indent=4)
+            print(f"📝 已生成市場摘要文件: {market_summary_file}")
         if service and os.path.exists(db_file):
             print(f"🧹 優化並同步雲端...")
             try:
@@ -157,13 +161,14 @@ def main():
     # --- 🌍 新增：全球特徵摘要 JSON 生成與上傳 ---
     if all_summaries:
         print("\n🌍 正在生成全球市場特徵摘要...")
-        json_file = "global_summary.json"
-        with open(json_file, "w", encoding="utf-8") as f:
-            json.dump(all_summaries, f, ensure_ascii=False, indent=4)
-        
-        if service:
-            print(f"📡 正在同步 {json_file} 至雲端...")
-            upload_to_drive(service, json_file, mimetype='application/json')
+        if len(markets_to_run) > 1:
+            json_file = "global_summary.json"
+            with open(json_file, "w", encoding="utf-8") as f:
+                json.dump(all_summaries, f, ensure_ascii=False, indent=4)
+            
+            if service:
+                print(f"📡 正在同步 {json_file} 至雲端...")
+                upload_to_drive(service, json_file, mimetype='application/json')
 
     # 6. 發送報告
     if notifier and all_summaries:
@@ -175,3 +180,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
