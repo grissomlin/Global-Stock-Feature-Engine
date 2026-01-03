@@ -8,7 +8,7 @@ html5lib
 requests
 cryptography
 python-dotenv
-
+pyperclip
 # --- 2. 核心下載與技術分析 ---
 # 💡 yfinance 建議不指定版本以獲取最新的 API 修復，或指定較新版本
 yfinance>=0.2.40
@@ -47,3 +47,4 @@ psycopg2-binary     # 💡 如果要連線 PostgreSQL (如 Supabase) 必備
 # --- 9. 其他輔助 ---
 beautifulsoup4      # 💡 雖然有 lxml，但 bs4 對爬蟲更友善
 typing-extensions   # 💡 解決 Python 版本間類型註釋的相容性問題
+
