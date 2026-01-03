@@ -98,3 +98,103 @@ jobs:
           if token and chat_id:
               requests.post(f'https://api.telegram.org/bot{token}/sendMessage', json={'chat_id': chat_id, 'text': msg})
           "
+
+  # 💡 新增：合併全球市場摘要任務
+  merge-global-summary:
+    needs: execute-task  # 等待所有市場任務完成
+    runs-on: ubuntu-latest
+    if: always()  # 即使有市場任務失敗也執行合併
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download all market summary files
+        # 由於每個市場任務可能在不同的 runner 上執行，我們需要下載所有市場的摘要文件
+        # 這裡假設每個市場的摘要文件已經被保存在工作區中
+        run: |
+          echo "正在收集所有市場的摘要文件..."
+          # 創建一個數組包含所有市場
+          markets=("tw" "us" "cn" "hk" "jp" "kr")
+          for market in "${markets[@]}"; do
+            if [ -f "summary_${market}.json" ]; then
+              echo "✅ 找到 ${market} 市場的摘要文件"
+            else
+              # 如果文件不存在，創建一個預設的摘要文件
+              echo "⚠️ 未找到 ${market} 市場的摘要文件，創建預設摘要"
+              echo '{
+                "market": "'"$market"'",
+                "success": 0,
+                "coverage": "0%",
+                "status": "❌ 未同步",
+                "end_date": "尚未同步"
+              }' > "summary_${market}.json"
+            fi
+          done
+
+      - name: 合併全球市場摘要
+        run: |
+          python -c "
+import json
+import os
+
+# 市場列表
+market_list = ['tw', 'us', 'cn', 'hk', 'jp', 'kr']
+summary_data = []
+
+for market in market_list:
+    filename = f'summary_{market}.json'
+    try:
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                summary_data.append(data)
+        else:
+            # 創建預設狀態
+            summary_data.append({
+                'market': market.upper(),
+                'success': 0,
+                'coverage': '0%',
+                'status': '❌ 未同步',
+                'end_date': '尚未同步'
+            })
+    except Exception as e:
+        print(f'讀取 {filename} 失敗: {e}')
+        summary_data.append({
+            'market': market.upper(),
+            'success': 0,
+            'coverage': '0%',
+            'status': '❌ 讀取失敗',
+            'end_date': '錯誤'
+        })
+
+# 寫入合併後的 global_summary.json
+with open('global_summary.json', 'w', encoding='utf-8') as f:
+    json.dump(summary_data, f, ensure_ascii=False, indent=2)
+
+print(f'✅ 已合併 {len(summary_data)} 個市場的摘要數據')
+print('合併結果:')
+for item in summary_data:
+    print(f"  {item['market']}: {item['status']} ({item['success']}家, {item['coverage']})")
+          "
+
+      - name: Upload global summary as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: global-summary
+          path: global_summary.json
+          retention-days: 7
+
+      - name: Commit global summary to repo
+        # 將合併後的 global_summary.json 提交回倉庫
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add global_summary.json
+          git commit -m "📊 更新全球市場摘要 [skip ci]" || echo "沒有變更可提交"
+          git push
