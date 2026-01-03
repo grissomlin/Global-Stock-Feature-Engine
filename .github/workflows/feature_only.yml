@@ -1,0 +1,39 @@
+name: Only Feature Engineering
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: '選擇要加工的市場'
+        required: true
+        default: 'tw'
+        type: choice
+        options: [tw, us, cn, hk, jp, kr]
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install pandas numpy
+
+      # 🚀 關鍵：從快取抓回舊的資料庫
+      - name: Restore DB Cache
+        uses: actions/cache@v3
+        with:
+          path: "*.db"
+          key: ${{ github.event.inputs.market }}-db-v3- # 這裡用 restore-keys 匹配最近一次成功的快取
+          restore-keys: |
+            ${{ github.event.inputs.market }}-db-v3-
+
+      - name: Run Processing
+        run: python only_feature.py ${{ github.event.inputs.market }}
+
+      # 加工完後，可以選擇再次上傳到 Google Drive (需要設定 env)
+      # ... (此處可加入 upload_db_to_drive 邏輯)
