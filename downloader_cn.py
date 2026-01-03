@@ -148,7 +148,7 @@ def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
         
-        # 中國市場伺服器較敏感，建議維持 0.05s 以上延遲
+        # 中國市場伺服器較敏感，建議維持 0.05s 以上延遲  
         time.sleep(0.05)
     
     conn.commit()
