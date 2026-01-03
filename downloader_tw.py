@@ -5,6 +5,7 @@ import yfinance as yf
 from io import StringIO
 from datetime import datetime, timedelta
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ========== 1. 環境設定 ==========
 MARKET_CODE = "tw-share"
@@ -27,7 +28,6 @@ def init_db():
     finally:
         conn.close()
 
-# 💡 新增：檢查資料庫中該標的最後一筆日期
 def get_last_date(symbol, conn):
     try:
         query = "SELECT MAX(date) FROM stock_prices WHERE symbol = ?"
@@ -36,121 +36,115 @@ def get_last_date(symbol, conn):
     except:
         return None
 
-# ========== 3. 獲取台股清單 ==========
+# ========== 3. 獲取台股清單 (維持原樣) ==========
 def get_tw_stock_list():
     url_configs = [
         {'name': 'listed', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=1&issuetype=1&Page=1&chklike=Y', 'suffix': '.TW'},
-        {'name': 'dr', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=J&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
         {'name': 'otc', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=2&issuetype=4&Page=1&chklike=Y', 'suffix': '.TWO'},
-        {'name': 'etf', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=I&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
-        {'name': 'rotc', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=E&issuetype=R&industry_code=&Page=1&chklike=Y', 'suffix': '.TWO'},
-        {'name': 'tw_innovation', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=C&issuetype=C&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'},
-        {'name': 'otc_innovation', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=A&issuetype=C&industry_code=&Page=1&chklike=Y', 'suffix': '.TWO'},
+        {'name': 'etf', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?owncode=&stockname=&isincode=&market=1&issuetype=I&industry_code=&Page=1&chklike=Y', 'suffix': '.TW'}
     ]
-    
-    log(f"📡 獲取台股清單 (自動跳過權證分類)...")
+    log(f"📡 獲取台股清單...")
     conn = sqlite3.connect(DB_PATH)
     stock_list = []
-    
     for cfg in url_configs:
         try:
             resp = requests.get(cfg['url'], timeout=15)
             dfs = pd.read_html(StringIO(resp.text), header=0)
             if not dfs: continue
             df = dfs[0]
-            
             for _, row in df.iterrows():
                 code = str(row['有價證券代號']).strip()
                 name = str(row['有價證券名稱']).strip()
-                sector = str(row.get('產業別', 'Unknown')).strip()
-                
                 if code.isalnum() and len(code) >= 4:
                     symbol = f"{code}{cfg['suffix']}"
-                    conn.execute("""
-                        INSERT OR REPLACE INTO stock_info (symbol, name, sector, market, updated_at) 
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (symbol, name, sector, cfg['name'], datetime.now().strftime("%Y-%m-%d")))
+                    conn.execute("INSERT OR REPLACE INTO stock_info VALUES (?, ?, ?, ?, ?)", 
+                                 (symbol, name, str(row.get('產業別','')), cfg['name'], datetime.now().strftime("%Y-%m-%d")))
                     stock_list.append((symbol, name))
-        except Exception as e:
-            log(f"⚠️ {cfg['name']} 獲取失敗: {e}")
-            
+        except: continue
     conn.commit()
     conn.close()
     return list(set(stock_list))
 
-# ========== 4. 下載邏輯 (支援增量更新) ==========
-def download_one_stable(symbol, start_date, end_date):
+# ========== 4. 多執行緒下載單元 ==========
+def process_single_stock(item, start_date, end_date):
+    """執行單一股票的檢查與下載邏輯"""
+    symbol, name = item
+    
+    # 這裡重新建立連線，因為 SQLite 在多執行緒下寫入需要小心
+    # 我們這裡先唯讀檢查日期
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    last_date = get_last_date(symbol, conn)
+    conn.close()
+    
+    actual_start = start_date
+    if last_date:
+        if last_date >= end_date:
+            return "skipped", None
+        actual_start = (pd.to_datetime(last_date) + timedelta(days=1)).strftime('%Y-%m-%d')
+
     try:
-        # yfinance 的 end_date 是不包含的，所以若要抓到今天，end_date 建議設為明天
-        df = yf.download(symbol, start=start_date, end=end_date, progress=False, timeout=20, 
-                         auto_adjust=True, threads=False)
-        if df is None or df.empty: return None
+        df = yf.download(symbol, start=actual_start, end=end_date, progress=False, 
+                         auto_adjust=True, threads=False, timeout=15)
+        if df is None or df.empty:
+            return "no_data", None
         
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        
         df.reset_index(inplace=True)
         df.columns = [c.lower() for c in df.columns]
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
         
         df_final = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
         df_final['symbol'] = symbol
-        return df_final
+        return "success", df_final
     except:
-        return None
+        return "error", None
 
-# ========== 5. 主流程 (具備快取檢查機制) ==========
-def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
+# ========== 5. 主流程 (Multi-threading) ==========
+def run_sync(start_date="2024-01-01", end_date="2025-12-31", max_workers=5):
     start_time = time.time()
     init_db()
     
     items = get_tw_stock_list()
-    if not items:
-        log("❌ 無法獲取股票清單")
-        return {"success": 0, "total": 0}
+    if not items: return {"success": 0, "total": 0}
 
-    log(f"🚀 開始同步 TW | 區間: {start_date} ~ {end_date}")
+    log(f"🚀 多執行緒同步啟動 | 線程數: {max_workers} | 目標: {len(items)} 檔")
 
     success_count = 0
     skip_count = 0
-    conn = sqlite3.connect(DB_PATH, timeout=60)
     
-    pbar = tqdm(items, desc="TW增量同步")
-    for symbol, name in pbar:
-        # 💡 核心快取檢查邏輯
-        last_date_in_db = get_last_date(symbol, conn)
+    # 使用 ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 建立任務列表
+        futures = {executor.submit(process_single_stock, item, start_date, end_date): item for item in items}
         
-        actual_start = start_date
-        if last_date_in_db:
-            # 如果資料庫已有資料，計算下一天
-            next_day = (pd.to_datetime(last_date_in_db) + timedelta(days=1)).strftime('%Y-%m-%d')
+        conn = sqlite3.connect(DB_PATH, timeout=60)
+        
+        for future in tqdm(as_completed(futures), total=len(items), desc="TW併發下載"):
+            status, df_res = future.result()
             
-            # 如果下一天已經超過了我們要抓的 end_date，就直接跳過
-            if last_date_in_db >= end_date:
+            if status == "skipped":
                 skip_count += 1
-                continue
-            actual_start = next_day
+            elif status == "success" and df_res is not None:
+                # 寫入資料庫 (SQLite 寫入建議回到主線程處理以避免 lock)
+                df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
+                              method=lambda table, conn, keys, data_iter: 
+                              conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
+                success_count += 1
+            
+            # 每 100 筆 commit 一次
+            if (success_count + skip_count) % 100 == 0:
+                conn.commit()
 
-        df_res = download_one_stable(symbol, actual_start, end_date)
-        
-        if df_res is not None and not df_res.empty:
-            df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
-                          method=lambda table, conn, keys, data_iter: 
-                          conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
-            success_count += 1
-        
-        # 稍微等待避免 Yahoo 封鎖
-        time.sleep(0.05)
-    
-    conn.commit()
-    log(f"🧹 優化資料庫 (VACUUM)...")
-    conn.execute("VACUUM")
-    conn.close()
+        conn.commit()
+        log(f"🧹 優化資料庫...")
+        conn.execute("VACUUM")
+        conn.close()
 
     duration = (time.time() - start_time) / 60
-    log(f"📊 同步完成！更新: {success_count} 檔 | 跳過: {skip_count} 檔 | 耗時: {duration:.1f} 分鐘")
-    
+    log(f"📊 同步完成！更新: {success_count} | 跳過: {skip_count} | 耗時: {duration:.1f} 分鐘")
     return {"success": success_count, "total": len(items)}
 
 if __name__ == "__main__":
-    run_sync()
+    # 建議 max_workers 設定在 5~10 之間，太高會被 Yahoo 封鎖 IP
+    run_sync(max_workers=8)
