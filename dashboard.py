@@ -103,14 +103,25 @@ if service:
                 )
 
                 # --- 5. 報酬分布分箱統計 (漲幅與跌幅雙矩陣) ---
-                if len(existing_features) > 0:
+                if not res_df.empty and len(existing_features) > 0:
                     st.divider()
                     st.header(f"📊 特徵統計矩陣 (分箱分析 vs 技術特徵)")
                 
+                    # 💡 修改後的統計函式：加入比例計算
                     def create_stat_matrix(data, bin_col, feat_cols):
                         stats_list = []
+                        total_samples = len(data) # 總樣本數
+                        
                         for b_label, group in data.groupby(bin_col, observed=True):
-                            row = {"分箱區間": b_label, "樣本數": len(group)}
+                            sample_count = len(group)
+                            proportion = (sample_count / total_samples * 100) if total_samples > 0 else 0
+                            
+                            row = {
+                                "分箱區間": b_label, 
+                                "樣本數": sample_count,
+                                "比例(%)": f"{proportion:.2f}%" # 👈 新增比例欄位
+                            }
+                            
                             for f in feat_cols:
                                 row[f"{f}_平均"] = group[f].mean()
                                 row[f"{f}_中位數"] = group[f].median()
@@ -120,7 +131,7 @@ if service:
                         return pd.DataFrame(stats_list)
                 
                     # 1. 最大漲幅分箱
-                    st.subheader("📈 最大漲幅分箱特徵 (看哪種斜率最容易大賺)")
+                    st.subheader("📈 最大漲幅分箱特徵 (觀察勝率分布)")
                     bins_up = [-100, 0, 5, 10, 20, 50, float('inf')]
                     labels_up = ["下行", "0-5%", "5-10%", "10-20%", "20-50%", ">50%"]
                     res_df['bin_up'] = pd.cut(res_df[up_col], bins=bins_up, labels=labels_up)
@@ -129,7 +140,7 @@ if service:
                     st.dataframe(up_matrix, use_container_width=True)
                 
                     # 2. 最大跌幅分箱
-                    st.subheader("📉 最大跌幅分箱特徵 (看哪種斜率最容易大跌/避險)")
+                    st.subheader("📉 最大跌幅分箱特徵 (觀察風險分布)")
                     bins_down = [float('-inf'), -20, -10, -5, 0, 100]
                     labels_down = ["重摔(<-20%)", "大跌(-20%~-10%)", "中跌(-10%~-5%)", "小跌(-5%~0%)", "抗跌(>0%)"]
                     res_df['bin_down'] = pd.cut(res_df[down_col], bins=bins_down, labels=labels_down)
@@ -137,18 +148,19 @@ if service:
                     down_matrix = create_stat_matrix(res_df, 'bin_down', existing_features)
                     st.dataframe(down_matrix, use_container_width=True)
                 
-                    # --- 6. AI 提示詞 ---
+                    # --- 6. AI 提示詞 (更新包含比例資訊) ---
                     st.divider()
                     st.subheader("🤖 AI 量化大師提示詞")
                     prompt = f"""
-你是一位量化投資專家。請分析以下兩份數據：
-漲幅特徵矩陣：{up_matrix.to_csv(index=False)}
-跌幅特徵矩陣：{down_matrix.to_csv(index=False)}
-
-請幫我找出：
-1. 大漲標的與大跌標在『MA20斜率』與『MACD速度』上的數值差異。
-2. 怎樣的斜率組合可以過濾掉『重摔』的分箱標的？
-"""
+                你是一位量化投資專家。請分析以下兩份數據：
+                漲幅特徵矩陣 (含比例)：{up_matrix.to_csv(index=False)}
+                跌幅特徵矩陣 (含比例)：{down_matrix.to_csv(index=False)}
+                
+                請幫我分析：
+                1. 哪個『比例』最高的分箱代表了此策略的常態表現？其斜率特徵為何？
+                2. 在高報酬分箱中，比例雖然可能較低，但其斜率與常態區間有何顯著差異？
+                3. 如何調整斜率門檻，才能降低『重摔』分箱的佔比？
+                """
                     st.code(prompt, language="markdown")
                 
                 # --- 7. 通俗版解釋區 ---
