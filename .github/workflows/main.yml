@@ -10,7 +10,7 @@ on:
         type: choice
         options: [all, tw, us, cn, hk, jp, kr]
   schedule:
-    - cron: '0 6 * * 1-5' # 💡 台北時間 14:00 執行 (14:00 CST = 06:00 UTC)
+    - cron: '0 6 * * 1-5'
 
 jobs:
   prepare-matrix:
@@ -40,7 +40,7 @@ jobs:
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       GDRIVE_SERVICE_ACCOUNT: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
-      GH_PAT: ${{ secrets.GH_PAT }} # 💡 跨 Repo 觸發需要的 Token
+      GH_PAT: ${{ secrets.GH_PAT }}
 
     steps:
       - name: Checkout Code
@@ -50,27 +50,37 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
+          cache: 'pip' # 💡 快取 Python 套件
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install resend google-api-python-client google-auth-httplib2 google-auth-oauthlib python-dotenv
+          pip install resend google-api-python-client google-auth-httplib2 google-auth-oauthlib python-dotenv pandas-ta tqdm yfinance
+
+      # 🚀 新增：資料庫檔案快取 (GitHub Cache)
+      - name: 💾 Restore Market Database Cache
+        id: db-cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            *.db
+          # 使用市場代碼作為 Key，確保六台機器不會互相覆蓋
+          # 這裡使用 run_id 的前綴來確保每次執行都有機會儲存新的內容
+          key: ${{ matrix.market }}-db-v1-${{ github.run_id }}
+          restore-keys: |
+            ${{ matrix.market }}-db-v1-
 
       - name: Run Market Update
         run: |
-          # 使用 -u 參數強制讓 python 即時印出 log
+          # main.py 會先檢查本地是否有快取恢復的 .db，如果沒有才去 Google Drive 抓
           python -u main.py ${{ matrix.market }}
 
-      # 🚀 連動步驟：只要該市場更新成功，就發送訊號給 Alpha Lab
+      # 📢 觸發連動 (維持原樣)
       - name: 📢 Trigger Alpha Data Lab Sync
         if: success()
         run: |
-          # 轉換市場簡稱為資料庫格式 (例如 tw -> tw_stock_warehouse)
           DB_NAME="${{ matrix.market }}_stock_warehouse"
-          echo "🚀 市場 ${{ matrix.market }} 更新成功，正在遠端觸發 Alpha-Data-Cleaning-Lab 精煉 $DB_NAME..."
-          
           curl -X POST https://api.github.com/repos/grissomlin/Alpha-Data-Cleaning-Lab/dispatches \
           -H "Accept: application/vnd.github.v3+json" \
           -H "Authorization: bearer $GH_PAT" \
@@ -84,7 +94,7 @@ jobs:
           token = os.getenv('TELEGRAM_BOT_TOKEN')
           chat_id = os.getenv('TELEGRAM_CHAT_ID')
           market = '${{ matrix.market }}'.upper()
-          msg = f'❌ 【系統崩潰】市場: {market}\n原因：GitHub Actions 執行失敗，請檢查日誌。'
+          msg = f'❌ 【系統崩潰】市場: {market}\n原因：GitHub Actions 執行失敗。'
           if token and chat_id:
               requests.post(f'https://api.telegram.org/bot{token}/sendMessage', json={'chat_id': chat_id, 'text': msg})
           "
