@@ -44,6 +44,30 @@ down_col = f"down_{reward_period}"
 
 # --- 4. 主程式邏輯 ---
 st.title("🌐 全球股市特徵引擎 - 策略篩選中心")
+# --- 在 dashboard.py 標題下方加入 ---
+def show_global_battlefield():
+    if os.path.exists("global_summary.json"):
+        with open("global_summary.json", "r", encoding="utf-8") as f:
+            summary_data = json.load(f)
+        
+        st.header("🌐 全球市場特徵引擎 - 即時戰報")
+        cols = st.columns(len(summary_data))
+        
+        for i, m in enumerate(summary_data):
+            with cols[i]:
+                # 根據涵蓋率決定顏色
+                color = "normal" if "✅" in m['status'] else "inverse"
+                st.metric(
+                    label=f"{m['market']} 市場",
+                    value=m['success'],
+                    delta=f"{m['coverage']} 涵蓋",
+                    delta_color=color
+                )
+                st.caption(f"📅 最新: {m['end_date']}")
+    else:
+        st.info("ℹ️ 尚未偵測到全球摘要數據，請運行完整同步流程。")
+
+show_global_battlefield()
 service = get_gdrive_service()
 
 if service:
