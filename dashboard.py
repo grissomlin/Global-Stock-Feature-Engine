@@ -1,5 +1,5 @@
 import streamlit as st
-import os, json, sqlite3, io
+import os, json, sqlite3, io, pyperclip
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go 
@@ -56,7 +56,6 @@ down_col = f"down_{reward_period}"
 st.title("🌐 全球股市特徵引擎 - 策略篩選中心")
 
 def show_global_battlefield():
-    # 這裡假設 main.py 產出的 global_summary.json 已存在於目錄下
     if os.path.exists("global_summary.json"):
         with open("global_summary.json", "r", encoding="utf-8") as f:
             summary_data = json.load(f)
@@ -146,8 +145,6 @@ if not res_df.empty:
     st.divider()
     st.header("📊 策略報酬分佈視覺化")
     
-    # 
-    
     plot_col = up_col if strategy_type != "無" else 'ytd_ret'
     bins_total = [-100, -20, -10, -5, 0, 5, 10, 20, 50, 100, 500]
     labels_total = ["<-20%", "-20~-10%", "-10~-5%", "-5~0%", "0~5%", "5~10%", "10~20%", "20~50%", "50~100%", ">100%"]
@@ -198,17 +195,44 @@ if not res_df.empty:
         down_matrix = create_stat_matrix(res_df, 'bin_down', existing_features)
         st.dataframe(down_matrix, use_container_width=True)
 
-        # AI 提示詞
+        # AI 提示詞 + 複製按鈕
         st.divider()
-        st.subheader("🤖 AI 量化大師提示詞 (複製到 ChatGPT)")
+        st.subheader("🤖 AI 量化大師提示詞")
+        
+        # 建立提示詞
         csv_data = up_matrix.to_csv(index=False)
-        st.code(f"請分析這份漲幅特徵矩陣，找出高報酬分箱的斜率規律：\n{csv_data}", language="markdown")
+        prompt_text = f"""請分析這份漲幅特徵矩陣，找出高報酬分箱的斜率規律：
+
+{csv_data}
+
+請提供以下分析：
+1. 找出哪個特徵在高報酬分箱中有明顯差異
+2. 建議具體的量化交易策略
+3. 預測此策略的風險與回報特性
+4. 提供可能的改進方向"""
+
+        # 顯示提示詞框和複製按鈕
+        cols = st.columns([4, 1])
+        with cols[0]:
+            st.code(prompt_text, language="markdown")
+        
+        with cols[1]:
+            st.write("")  # 空白行對齊
+            st.write("")
+            if st.button("📋 一鍵複製到剪貼板", use_container_width=True):
+                try:
+                    # 嘗試使用 pyperclip
+                    import pyperclip
+                    pyperclip.copy(prompt_text)
+                    st.success("✅ 已複製到剪貼板！")
+                except:
+                    # 如果 pyperclip 不可用，使用 streamlit 的複製功能
+                    st.info("📋 請手動複製上方程式碼")
 
 # --- 7. 教學解釋區 ---
 st.divider()
 st.header("📖 量化特徵小知識")
 with st.expander("💡 什麼是「特徵欄位分析」？"):
-    # 
     st.markdown("""
     ### 🧬 為什麼看斜率而不只看價格？
     * **MA20 斜率**：車子的「瞬時時速」。斜率越高，衝刺力越強。
@@ -219,3 +243,42 @@ with st.expander("💡 什麼是「特徵欄位分析」？"):
     * **偏度 (Skewness)**：衡量「暴發戶」的存在。正偏代表這區間裡混有大漲的飆股。
     * **峰度 (Kurtosis)**：衡量「規律性」。峰度越高，代表選出來的標的表現越整齊，容易複製成功。
     """)
+
+# --- 8. 頁尾連結區 (新增打賞按鈕) ---
+st.divider()
+st.markdown("""
+<div style="text-align: center;">
+    <table style="margin: 0 auto; border-collapse: separate; border-spacing: 20px 0;">
+        <tr>
+            <td style="text-align: center; vertical-align: top;">
+                <div style="font-size: 1.5em;">🛠️</div>
+                <a href="https://vocus.cc/article/695636c3fd89780001d873bd" target="_blank" style="text-decoration: none;">
+                    <b>⚙️ 環境與 AI 設定教學</b>
+                </a>
+            </td>
+            <td style="text-align: center; vertical-align: top;">
+                <div style="font-size: 1.5em;">📊</div>
+                <a href="https://vocus.cc/salon/grissomlin/room/695636ee0c0c0689d1e2aa9f" target="_blank" style="text-decoration: none;">
+                    <b>📖 儀表板功能詳解</b>
+                </a>
+            </td>
+            <td style="text-align: center; vertical-align: top;">
+                <div style="font-size: 1.5em;">🐙</div>
+                <a href="https://github.com/grissomlin/StockRevenueLab" target="_blank" style="text-decoration: none;">
+                    <b>💻 GitHub 專案原始碼</b>
+                </a>
+            </td>
+            <td style="text-align: center; vertical-align: top;">
+                <div style="font-size: 1.5em;">❤️</div>
+                <a href="https://vocus.cc/pay/donate/606146a3fd89780001ba32e9?donateSourceType=article&donateSourceRefID=69107512fd89780001396f10" 
+                   target="_blank" style="text-decoration: none; color: #ff6b6b;">
+                    <b>💝 打賞支持作者</b>
+                </a>
+                <div style="font-size: 0.8em; margin-top: 5px; color: #666;">
+                    喜歡這個儀表板嗎？<br>歡迎支持繼續開發！
+                </div>
+            </td>
+        </tr>
+    </table>
+</div>
+""", unsafe_allow_html=True)
