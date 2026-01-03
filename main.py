@@ -7,19 +7,21 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from dotenv import load_dotenv
 
-# 💡 載入環境變數 (本地端使用 .env, 雲端使用 Secrets)
+# 💡 載入環境變數
 load_dotenv() 
 
 socket.setdefaulttimeout(600)
-GDRIVE_FOLDER_ID = '1ltKCQ209k9MFuWV6FIxQ1coinV2fxSyl' 
+
+# 💡 修正點 1：從環境變數讀取資料夾 ID，若無則使用預設值
+GDRIVE_FOLDER_ID = os.environ.get('GDRIVE_FOLDER_ID', '1ltKCQ209k9MFuWV6FIxQ1coinV2fxSyl')
 SERVICE_ACCOUNT_FILE = 'citric-biplane-319514-75fead53b0f5.json'
 
-# 載入加工模組 (feature_engineer.py)
+# 💡 修正點 2：正確導入 processor 函式 (假設 processor.py 在根目錄)
 try:
-    import processor
+    from processor import process_market_data
 except ImportError:
-    print("⚠️ 找不到 processor.py，將跳過特徵工程步驟。")
-    processor = None
+    print("⚠️ 找不到 processor.py 中的 process_market_data，將跳過特徵工程。")
+    process_market_data = None
 
 try:
     from notifier import StockNotifier
@@ -37,7 +39,6 @@ EXPECTED_MIN_STOCKS = {
 
 # ========== Google Drive 服務 ==========
 def get_drive_service():
-    # 優先從環境變數讀取 JSON 字串 (Replit/GitHub 專用)
     env_json = os.environ.get('GDRIVE_SERVICE_ACCOUNT')
     try:
         if env_json:
@@ -53,6 +54,7 @@ def get_drive_service():
         return None
 
 def download_db_from_drive(service, file_name):
+    # 💡 這裡會自動使用上面定義的變數 GDRIVE_FOLDER_ID
     query = f"name = '{file_name}' and '{GDRIVE_FOLDER_ID}' in parents and trashed = false"
     try:
         results = service.files().list(q=query, fields="files(id)").execute()
@@ -94,7 +96,6 @@ def get_db_summary(db_path, market_id):
     if not os.path.exists(db_path): return None
     try:
         conn = sqlite3.connect(db_path)
-        # 統計原始資料與加工後的資料
         df_stats = pd.read_sql("SELECT COUNT(DISTINCT symbol) as s, MAX(date) as d2 FROM stock_prices", conn)
         conn.close()
         success_count = int(df_stats['s'][0]) if df_stats['s'][0] else 0
@@ -109,10 +110,8 @@ def get_db_summary(db_path, market_id):
     except: return None
 
 def main():
-    # 支援 GitHub Actions 帶入參數，例如: python main.py tw
     target_market = sys.argv[1].lower() if len(sys.argv) > 1 else None
     
-    # 💡 設定抓取時間區間
     START_DATE = "2024-01-01"
     END_DATE = "2025-12-31"
 
@@ -129,27 +128,22 @@ def main():
         db_file = f"{m}_stock_warehouse.db"
         print(f"\n--- 🌍 市場啟動: {m.upper()} ---")
 
-        # 1. 嘗試同步雲端現有檔
         if service and not os.path.exists(db_file):
             download_db_from_drive(service, db_file)
 
-        # 2. 執行下載 (第一階段：Raw Data)
         target_module = module_map.get(m)
         print(f"🚀 正在下載原始數據...")
-        # 呼叫修改後的 downloader，帶入日期
         exec_results = target_module.run_sync(start_date=START_DATE, end_date=END_DATE)
         
-        # 3. 執行特徵工程 (第二階段：Indicator & Labeling)
-        if processor and exec_results.get('success', 0) > 0:
+        # 💡 修正點 3：使用正確導入的 process_market_data 函式
+        if process_market_data and exec_results.get('success', 0) > 0:
             print(f"🧪 正在執行特徵工程 (技術指標 & 未來報酬)...")
-            processor.process_market_data(db_file)
+            process_market_data(db_file)
         
-        # 4. 生成摘要
         summary = get_db_summary(db_file, m)
         if summary:
             all_summaries.append(summary)
 
-        # 5. 優化與上傳 (只要有跑下載就更新雲端)
         if service:
             print(f"🧹 正在優化資料庫並同步至雲端...")
             try:
@@ -160,7 +154,6 @@ def main():
             except Exception as e:
                 print(f"❌ 同步失敗: {e}")
 
-    # 6. 發送通知
     if notifier and all_summaries:
         notifier.send_stock_report_email(all_summaries)
 
