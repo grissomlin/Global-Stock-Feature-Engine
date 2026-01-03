@@ -1,111 +1,94 @@
 import streamlit as st
-import os, json, sqlite3, io
+import sqlite3
 import pandas as pd
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
 
-st.set_page_config(page_title="全球股市特徵引擎 - 數據中心", layout="wide")
+# --- 側邊欄：篩選條件 ---
+st.sidebar.header("🔍 選股策略條件")
 
-# --- 1. 配置與服務初始化 ---
-def get_gdrive_service():
-    if "GDRIVE_SERVICE_ACCOUNT" not in st.secrets:
-        st.error("❌ Secrets 中缺少 GDRIVE_SERVICE_ACCOUNT 設定")
-        return None
-    try:
-        info = json.loads(st.secrets["GDRIVE_SERVICE_ACCOUNT"])
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"❌ 服務初始化失敗: {e}")
-        return None
+# 1. 年份與月份篩選
+year = st.sidebar.selectbox("選擇年份", [2024, 2025], index=1)
+if year == 2025:
+    month = st.sidebar.selectbox("選擇月份", list(range(1, 12))) # 2025 只提供 1-11 月
+else:
+    month = st.sidebar.selectbox("選擇月份", list(range(1, 13)))
 
-# --- 2. 下載邏輯 ---
-def download_file(service, file_id, file_name):
-    request = service.files().get_media(fileId=file_id)
-    fh = io.FileIO(file_name, 'wb')
-    downloader = MediaIoBaseDownload(fh, request)
-    done = False
-    with st.spinner(f'🚀 正在從雲端同步 {file_name}...'):
-        while done is False:
-            status, done = downloader.next_chunk()
-    return True
+# 2. 技術指標交叉策略
+strategy_type = st.sidebar.selectbox(
+    "技術指標策略", 
+    ["無", "KD 黃金交叉", "MACD 柱狀圖轉正", "均線多頭排列(MA20>MA60)"]
+)
 
-# --- 3. 主程式介面 ---
-st.title("🇹🇼 台灣市場數據掃描 (自動同步)")
+# 3. 未來報酬目標選單
+reward_target = st.sidebar.selectbox(
+    "未來報酬評估區間", 
+    ["up_1-5", "up_6-10", "up_11-20"]
+)
 
-service = get_gdrive_service()
+# 4. 背離條件 (可選)
+use_divergence = st.sidebar.checkbox("開啟背離過濾 (Divergence)")
+div_type = "無"
+if use_divergence:
+    div_type = st.sidebar.radio("選擇背離指標", ["MACD 底部背離", "KD 底部背離"])
 
-if service:
-    folder_id = st.secrets["GDRIVE_FOLDER_ID"]
-    try:
-        # 💡 核心修正：在這裡定義 online_db_list
-        query = f"'{folder_id}' in parents and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        online_db_list = results.get('files', [])
+# --- 資料處理與查詢 ---
+def fetch_filtered_data(db_path, y, m, strat, reward, div):
+    conn = sqlite3.connect(db_path)
+    # 格式化日期範圍
+    start_dt = f"{y}-{m:02d}-01"
+    # 簡單計算月底 (可用 pd.offsets 但此處手寫簡化)
+    end_dt = f"{y}-{m:02d}-31"
+    
+    query = f"SELECT * FROM stock_analysis WHERE date BETWEEN '{start_dt}' AND '{end_dt}'"
+    df = pd.read_sql(query, conn)
+    conn.close()
+    
+    # 執行過濾邏輯
+    if strat == "KD 黃金交叉":
+        df = df[df['kd_gold'] == 1]
+    elif strat == "MACD 柱狀圖轉正":
+        df = df[df['macdh_slope'] > 0]
+    elif strat == "均線多頭排列(MA20>MA60)":
+        df = df[df['ma20'] > df['ma60']]
         
-        # 設定預設下載目標
-        TARGET_DB = "tw_stock_warehouse.db"
+    if div == "MACD 底部背離":
+        df = df[df['macd_bottom_div'] == 1]
+    elif div == "KD 底部背離":
+        df = df[df['kd_bottom_div'] == 1]
         
-        # 如果本地沒有檔案，自動下載
-        if not os.path.exists(TARGET_DB):
-            tw_file = next((f for f in online_db_list if f['name'] == TARGET_DB), None)
-            if tw_file:
-                download_file(service, tw_file['id'], TARGET_DB)
-                st.success(f"✅ {TARGET_DB} 已成功同步至本地")
-            else:
-                st.warning(f"⚠️ 雲端資料夾中找不到 {TARGET_DB}")
+    return df
 
-        # --- 4. 數據表結構檢查 ---
-        if os.path.exists(TARGET_DB):
-            conn = sqlite3.connect(TARGET_DB)
-            # 獲取所有資料表名稱
-            tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
-            
-            # 優先讀取加工後的分析表
-            target_table = 'stock_analysis' if 'stock_analysis' in tables else 'stock_prices'
-            
-            st.divider()
-            st.header(f"📊 目前資料表：`{target_table}`")
-            
-            # 讀取數據樣例
-            df_sample = pd.read_sql(f"SELECT * FROM {target_table} LIMIT 20", conn)
-            
-            col1, col2 = st.columns([1, 3])
-            
-            with col1:
-                st.subheader("📌 欄位清單")
-                # 顯示所有欄位名稱及其資料型態
-                schema_info = pd.read_sql(f"PRAGMA table_info({target_table})", conn)
-                st.dataframe(schema_info[['name', 'type']], height=400)
-            
-            with col2:
-                st.subheader("💡 數據內容預覽 (Top 20)")
-                st.dataframe(df_sample, use_container_width=True)
-            
-            # 5. 快速特徵檢查指標
-            st.subheader("🛠️ 特徵工程檢查點")
-            cols = df_sample.columns.tolist()
-            indicators = {
-                "均線與斜率": ["ma20", "ma20_slope"],
-                "MACD 背離": ["macd", "macdh", "macd_bottom_div"],
-                "KD 訊號": ["k", "d", "kd_gold"],
-                "預測標籤": ["up_1-5", "up_6-10"]
-            }
-            
-            metrics_cols = st.columns(len(indicators))
-            for i, (name, fields) in enumerate(indicators.items()):
-                found = [f for f in fields if f in cols]
-                if len(found) == len(fields):
-                    metrics_cols[i].success(f"{name}: OK")
-                elif len(found) > 0:
-                    metrics_cols[i].warning(f"{name}: 部分遺漏")
-                else:
-                    metrics_cols[i].error(f"{name}: 未發現")
+# --- 顯示結果 ---
+st.header(f"🚀 篩選結果: {year}年{month}月")
+filtered_df = fetch_filtered_data(TARGET_DB, year, month, strategy_type, reward_target, div_type)
 
-            conn.close()
+if filtered_df.empty:
+    st.info("💡 目前條件下沒有符合的股票，請嘗試放寬篩選條件。")
+else:
+    # 整理顯示表格
+    display_df = filtered_df[['date', 'symbol', 'close', 'ma20_slope', reward_target]].copy()
+    
+    # 💡 建立玩股網超連結 (WantGoo)
+    # 台灣股票代號通常是 2330.TW，需要去掉 .TW
+    def make_wantgoo_link(symbol):
+        clean_symbol = str(symbol).split('.')[0]
+        url = f"https://www.wantgoo.com/stock/{clean_symbol}/technical-chart"
+        return url
 
-    except Exception as e:
-        st.error(f"❌ 存取雲端資料夾失敗: {e}")
+    display_df['分析連結'] = display_df['symbol'].apply(make_wantgoo_link)
+    
+    # 使用 Streamlit 的 link column 功能
+    st.data_editor(
+        display_df,
+        column_config={
+            "分析連結": st.column_config.LinkColumn(
+                "玩股網圖表",
+                help="點擊前往技術線圖",
+                validate=r"^https://.*",
+                max_chars=100,
+            )
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+
+    st.success(f"✅ 找到 {len(display_df)} 筆符合訊號的資料")
