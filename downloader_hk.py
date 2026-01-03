@@ -2,18 +2,18 @@
 """
 downloader_hk.py
 ----------------
-港股資料下載器（穩定單執行緒版）
+港股資料下載器（支援快取增量更新版）
 
+✔ 支援快取：自動檢查資料庫最後日期，僅抓取缺口數據
 ✔ 支援日期連動：由 main.py 統一傳遞下載區間
 ✔ 強化判定邏輯：自動處理 4 位或 5 位代碼與 Yahoo Finance 格式
-✔ 結構對齊：完全支援全局自動化連動機制
 """
 
 import os, io, re, time, random, sqlite3, requests, urllib3
 import pandas as pd
 import yfinance as yf
 from io import StringIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from tqdm import tqdm
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -26,7 +26,7 @@ DB_PATH = os.path.join(BASE_DIR, "hk_stock_warehouse.db")
 def log(msg: str):
     print(f"{pd.Timestamp.now():%H:%M:%S}: {msg}", flush=True)
 
-# ========== 2. 資料庫初始化 ==========
+# ========== 2. 資料庫初始化與快取檢查 ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     try:
@@ -45,6 +45,15 @@ def init_db():
         """)
     finally:
         conn.close()
+
+# 💡 新增：檢查資料庫中該標的最後一筆日期
+def get_last_date(symbol, conn):
+    try:
+        query = "SELECT MAX(date) FROM stock_prices WHERE symbol = ?"
+        res = conn.execute(query, (symbol,)).fetchone()
+        return res[0] if res[0] else None
+    except:
+        return None
 
 # ========== 3. HKEX 清單解析 ==========
 def normalize_code_5d(val) -> str:
@@ -70,7 +79,6 @@ def get_hk_stock_list():
         log(f"❌ 無法獲取 HKEX 清單: {e}")
         return []
 
-    # 找表頭索引
     header_row = None
     for i in range(min(20, len(df_raw))):
         row_vals = [str(x).replace("\xa0", " ").strip() for x in df_raw.iloc[i].values]
@@ -106,50 +114,40 @@ def get_hk_stock_list():
     conn.close()
     return stock_list
 
-# ========== 4. 下載核心邏輯 (支援外部日期) ==========
+# ========== 4. 下載核心邏輯 (支援增量日期) ==========
 def download_one_hk(code_5d, start_date, end_date):
-    """
-    下載特定港股，並支援 yfinance 不同代碼格式嘗試
-    """
-    # 港股代碼嘗試：yfinance 可能接受 0005.HK 或 5.HK
     possible_syms = [f"{code_5d}.HK"]
     if code_5d.startswith("0"):
         possible_syms.append(f"{code_5d.lstrip('0')}.HK")
 
     for sym in possible_syms:
         try:
-            # 💡 核心修正：使用從外部傳入的 start_date 與 end_date
             df = yf.download(sym, start=start_date, end=end_date, progress=False, 
                              auto_adjust=True, threads=False, timeout=20)
 
             if df is None or df.empty:
                 continue
 
-            # 處理 MultiIndex
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
             df = df.reset_index()
             df.columns = [c.lower() for c in df.columns]
 
-            # 統一日期格式
             date_col = 'date' if 'date' in df.columns else df.columns[0]
             df['date_str'] = pd.to_datetime(df[date_col]).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
 
             df_final = df[['date_str', 'open', 'high', 'low', 'close', 'volume']].copy()
             df_final.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            df_final['symbol'] = code_5d  # 回填原始 5 位格式，例如 '00005'
+            df_final['symbol'] = code_5d 
 
             return df_final
         except Exception:
             continue
     return None
 
-# ========== 5. 主流程 (對齊 main.py) ==========
+# ========== 5. 主流程 (支援增量快取) ==========
 def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
-    """
-    主同步函式，由 main.py 調用
-    """
     start_time = time.time()
     init_db()
 
@@ -157,36 +155,48 @@ def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
     if not stocks:
         return {"success": 0, "has_changed": False}
 
-    log(f"🚀 開始港股同步 | 區間: {start_date} ~ {end_date} | 目標: {len(stocks)} 檔")
+    log(f"🚀 開始港股同步 | 目標: {len(stocks)} 檔")
 
     success_count = 0
+    skip_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
     
-    # 使用 tqdm 顯示進度
-    pbar = tqdm(stocks, desc="HK同步")
+    pbar = tqdm(stocks, desc="HK增量同步")
     for code_5d, name in pbar:
-        # 傳遞日期區間給下載核心
-        df_res = download_one_hk(code_5d, start_date, end_date)
+        # 💡 核心快取檢查邏輯
+        last_date_in_db = get_last_date(code_5d, conn)
         
-        if df_res is not None:
+        actual_start = start_date
+        if last_date_in_db:
+            # 如果資料庫已有資料，從最後日期的下一天開始抓
+            next_day = (pd.to_datetime(last_date_in_db) + timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            # 如果快取日期已達到或超過 end_date，則跳過
+            if last_date_in_db >= end_date:
+                skip_count += 1
+                continue
+            actual_start = next_day
+
+        df_res = download_one_hk(code_5d, actual_start, end_date)
+        
+        if df_res is not None and not df_res.empty:
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
                           method=lambda table, conn, keys, data_iter: 
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
             
-        # 🟢 控制下載頻率，港股反爬蟲機制較敏感
+        # 🟢 控制頻率
         time.sleep(0.05)
 
     conn.commit()
     
-    # 統計與優化
     unique_cnt = conn.execute("SELECT COUNT(DISTINCT symbol) FROM stock_prices").fetchone()[0]
     log("🧹 執行資料庫 VACUUM...")
     conn.execute("VACUUM")
     conn.close()
 
     duration = (time.time() - start_time) / 60
-    log(f"📊 港股完成 | 更新成功: {success_count} / {len(stocks)} | 資料庫股票總數: {unique_cnt}")
+    log(f"📊 港股完成 | 更新: {success_count} 檔 | 跳過: {skip_count} 檔 | 資料庫總數: {unique_cnt} | 耗時: {duration:.1f} 分鐘")
 
     return {
         "success": success_count,
@@ -195,5 +205,4 @@ def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
     }
 
 if __name__ == "__main__":
-    # 手動測試時預設下載近期區間
     run_sync(start_date="2024-01-01", end_date=datetime.now().strftime("%Y-%m-%d"))
