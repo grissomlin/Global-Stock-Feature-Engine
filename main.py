@@ -146,7 +146,7 @@ def main():
             # 💡 新增：生成該市場的獨立摘要文件
             market_summary_file = f"summary_{m}.json"
             with open(market_summary_file, "w", encoding="utf-8") as f:
-                json.dump(summary, f, ensure_ascii=False, indent=4)
+                json.dump(summary, f, ensure_ascii=False, indent=4)  # 這裡少了 indent
             print(f"📝 已生成市場摘要文件: {market_summary_file}")
         if service and os.path.exists(db_file):
             print(f"🧹 優化並同步雲端...")
@@ -180,4 +180,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
