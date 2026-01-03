@@ -74,25 +74,100 @@ def download_db_from_drive(service, file_name):
         return True
     except: return False
 
-def upload_db_to_drive(service, file_path):
-    if not GDRIVE_FOLDER_ID or not os.path.exists(file_path): return False
-    file_name = os.path.basename(file_path)
-    media = MediaFileUpload(file_path, mimetype='application/x-sqlite3', resumable=True)
-    query = f"name = '{file_name}' and '{GDRIVE_FOLDER_ID}' in parents and trashed = false"
-    
-    try:
-        results = service.files().list(q=query, fields="files(id)").execute()
-        items = results.get('files', [])
-        if items:
-            service.files().update(fileId=items[0]['id'], media_body=media).execute()
-        else:
-            meta = {'name': file_name, 'parents': [GDRIVE_FOLDER_ID]}
-            service.files().create(body=meta, media_body=media).execute()
-        print(f"✅ 雲端快取更新完成: {file_name}")
-        return True
-    except Exception as e:
-        print(f"⚠️ {file_name} 同步失敗: {e}")
+def upload_db_to_drive(service, file_path, max_retries=3):
+    """
+    上傳資料庫到 Google Drive，加入重試機制
+    """
+    if not GDRIVE_FOLDER_ID or not os.path.exists(file_path): 
+        print(f"⚠️ 無法上傳 {file_path}: 缺少 GDRIVE_FOLDER_ID 或檔案不存在")
         return False
+    
+    file_name = os.path.basename(file_path)
+    file_size = os.path.getsize(file_path)
+    
+    print(f"📤 準備上傳 {file_name} (大小: {file_size/1024/1024:.2f} MB)")
+    
+    # 檢查檔案大小，如果太大需要調整 chunksize
+    chunk_size = 5 * 1024 * 1024  # 5MB
+    if file_size > 100 * 1024 * 1024:  # 如果大於 100MB
+        chunk_size = 10 * 1024 * 1024  # 使用 10MB chunks
+    
+    for attempt in range(max_retries):
+        try:
+            # 每次重試都重新創建 media
+            media = MediaFileUpload(
+                file_path, 
+                mimetype='application/x-sqlite3', 
+                resumable=True,
+                chunksize=chunk_size
+            )
+            
+            query = f"name = '{file_name}' and '{GDRIVE_FOLDER_ID}' in parents and trashed = false"
+            results = service.files().list(q=query, fields="files(id)").execute()
+            items = results.get('files', [])
+            
+            if items:
+                print(f"🔄 嘗試更新現有檔案 (第 {attempt+1}/{max_retries} 次嘗試)")
+                file_id = items[0]['id']
+                
+                # 更新檔案
+                request = service.files().update(
+                    fileId=file_id,
+                    media_body=media,
+                    fields='id'
+                )
+                
+                # 執行更新請求
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status:
+                        print(f"  上傳進度: {int(status.progress() * 100)}%")
+                
+            else:
+                print(f"🔄 嘗試創建新檔案 (第 {attempt+1}/{max_retries} 次嘗試)")
+                meta = {'name': file_name, 'parents': [GDRIVE_FOLDER_ID]}
+                
+                # 創建新檔案
+                request = service.files().create(
+                    body=meta,
+                    media_body=media,
+                    fields='id'
+                )
+                
+                # 執行創建請求
+                response = None
+                while response is None:
+                    status, response = request.next_chunk()
+                    if status:
+                        print(f"  上傳進度: {int(status.progress() * 100)}%")
+            
+            print(f"✅ {file_name} 上傳成功!")
+            return True
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"⚠️ {file_name} 上傳失敗 (第 {attempt+1}/{max_retries} 次): {error_msg}")
+            
+            # 檢查是否為 SSL 相關錯誤
+            if "SSL" in error_msg or "EOF" in error_msg or "SSL23" in error_msg:
+                print("  偵測到 SSL 連線問題，等待後重試...")
+                time.sleep(5 * (attempt + 1))  # 指數退避等待
+                
+                # 嘗試重新獲取服務
+                try:
+                    service = get_drive_service()
+                    if not service:
+                        print("  ❌ 無法重新建立 Google Drive 服務")
+                        continue
+                except Exception as reconnect_error:
+                    print(f"  ❌ 重新建立服務失敗: {reconnect_error}")
+            else:
+                # 其他錯誤，等待較短時間
+                time.sleep(2 * (attempt + 1))
+    
+    print(f"❌ {file_name} 上傳失敗，已嘗試 {max_retries} 次")
+    return False
 
 # ========== 主程式邏輯 ==========
 
@@ -155,9 +230,24 @@ def main():
                 conn = sqlite3.connect(db_file)
                 conn.execute("VACUUM")
                 conn.close()
-                upload_db_to_drive(service, db_file)
+                
+                # 使用改進後的上傳函數
+                if upload_db_to_drive(service, db_file):
+                    print(f"✅ {db_file} 雲端快取更新成功!")
+                else:
+                    print(f"⚠️ {db_file} 雲端快取更新失敗，但本地檔案已儲存")
+                    
             except Exception as e:
-                print(f"❌ 雲端同步失敗: {e}")
+                print(f"❌ 資料庫優化或上傳失敗: {e}")
+                
+                # 嘗試簡單備份
+                try:
+                    backup_file = f"{db_file}.backup"
+                    import shutil
+                    shutil.copy2(db_file, backup_file)
+                    print(f"📋 已建立本地備份: {backup_file}")
+                except:
+                    print("⚠️ 無法建立本地備份")
 
     print("\n✅ 所有選定市場處理完畢。")
 
