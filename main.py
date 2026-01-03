@@ -193,3 +193,13 @@ def main():
 
 if __name__ == "__main__":
     main()
+# --- 在 main.py 的最後加入 ---
+if all_summaries:
+    print("🌍 正在生成全球市場特徵摘要...")
+    with open("global_summary.json", "w", encoding="utf-8") as f:
+        json.dump(all_summaries, f, ensure_ascii=False, indent=4)
+    
+    # 如果有 service，也同步傳一份到 Google Drive
+    if service:
+        # 這裡可以寫一個簡單的 upload 邏輯將 json 傳上去
+        pass
