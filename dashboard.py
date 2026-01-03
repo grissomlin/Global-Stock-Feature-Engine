@@ -1,69 +1,86 @@
 import streamlit as st
-import os
-import json
 import sqlite3
 import pandas as pd
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+import os
+import io
+from googleapiclient.http import MediaIoBaseDownload
 
-st.title("🌐 全球股市特徵引擎 - 系統診斷")
+# --- 核心下載函式 ---
+def download_file(service, file_id, file_name):
+    request = service.files().get_media(fileId=file_id)
+    fh = io.FileIO(file_name, 'wb')
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    with st.spinner(f'正在從雲端同步 {file_name}...'):
+        while done is False:
+            status, done = downloader.next_chunk()
+    return True
 
-# --- 診斷步驟 ---
-def run_diagnostics():
-    st.header("🔍 系統連線診斷")
+# --- 讀取欄位結構 ---
+def get_table_schema(db_path):
+    conn = sqlite3.connect(db_path)
+    # 優先找加工過的分析表，找不到才找原始價格表
+    tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
+    target = 'stock_analysis' if 'stock_analysis' in tables else 'stock_prices'
     
-    # 步驟 1: 檢查 Secrets 是否存在
-    if "GDRIVE_SERVICE_ACCOUNT" not in st.secrets or "GDRIVE_FOLDER_ID" not in st.secrets:
-        st.error("❌ 診斷失敗: Streamlit Secrets 中缺少必要變數 (GDRIVE_SERVICE_ACCOUNT 或 GDRIVE_FOLDER_ID)")
-        return None, None
+    # 抓取前 5 筆資料與欄位清單
+    df_sample = pd.read_sql(f"SELECT * FROM {target} LIMIT 5", conn)
+    columns = df_sample.columns.tolist()
+    conn.close()
+    return target, columns, df_sample
 
-    # 步驟 2: 嘗試初始化 Google Drive 服務
-    try:
-        info = json.loads(st.secrets["GDRIVE_SERVICE_ACCOUNT"])
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-        service = build('drive', 'v3', credentials=creds)
-        st.success("✅ Google Drive 服務初始化成功 (金鑰有效)")
-    except Exception as e:
-        st.error(f"❌ 診斷失敗: 無法驗證 Google 憑證。原因: {e}")
-        return None, None
+# --- 主程式介面 ---
+st.title("🇹🇼 台灣市場數據掃描 (預設)")
 
-    # 步驟 3: 嘗試列出資料夾內容
-    folder_id = st.secrets["GDRIVE_FOLDER_ID"]
-    try:
-        query = f"'{folder_id}' in parents and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        files = results.get('files', [])
-        
-        if not files:
-            st.warning(f"⚠️ 警告: 連線成功，但該資料夾 (ID: {folder_id}) 是空的，或者裡面沒有任何檔案。")
-            return service, []
-        
-        # 過濾出資料庫檔案
-        db_files = [f for f in files if f['name'].endswith('_stock_warehouse.db')]
-        if not db_files:
-            st.warning(f"⚠️ 警告: 資料夾內有 {len(files)} 個檔案，但沒有任何以 '_stock_warehouse.db' 結尾的資料庫檔案。")
-            st.write("資料夾內的檔案清單：", [f['name'] for f in files])
+if online_db_list: # 延續你之前的診斷結果
+    # 預設目標：台灣資料庫
+    TARGET_DB = "tw_stock_warehouse.db"
+    
+    # 1. 檢查檔案是否存在，不存在則自動下載
+    if not os.path.exists(TARGET_DB):
+        # 從 online_db_list 找到對應的 file_id
+        tw_file = next((f for f in online_db_list if f['name'] == TARGET_DB), None)
+        if tw_file:
+            download_file(service, tw_file['id'], TARGET_DB)
+            st.success(f"✅ {TARGET_DB} 已成功同步至本地環境")
         else:
-            st.success(f"✅ 成功找到 {len(db_files)}個資料庫檔案！")
-            
-        return service, db_files
+            st.error("❌ 雲端找不到台灣資料庫檔案")
 
-    except Exception as e:
-        st.error(f"❌ 診斷失敗: 無法存取資料夾。請檢查 Folder ID 是否正確，以及該資料夾是否有分享給 Service Account。")
-        st.info(f"您的 Service Account Email 為: {info.get('client_email')}")
-        return None, None
+    # 2. 顯示結構分析
+    if os.path.exists(TARGET_DB):
+        table_name, cols, df_sample = get_table_schema(TARGET_DB)
+        
+        st.header(f"📊 資料表結構：`{table_name}`")
+        
+        # 使用 Columns 呈現資訊
+        c1, c2 = st.columns([1, 2])
+        with c1:
+            st.subheader("📌 偵測到的特徵欄位")
+            st.write(cols)
+        
+        with c2:
+            st.subheader("💡 數據內容預覽")
+            st.dataframe(df_sample, use_container_width=True)
 
-# 執行診斷並取得檔案清單
-service, online_db_list = run_diagnostics()
-
-# --- 如果有檔案，提供下載按鈕 ---
-if online_db_list:
-    st.divider()
-    st.subheader("📥 雲端檔案同步")
-    selected_to_download = st.multiselect("選擇要下載到儀表板環境的檔案", [f['name'] for f in online_db_list])
-    
-    if st.button("開始下載檔案"):
-        # 這裡放入你之前的 download_db_from_drive 邏輯
-        st.info("下載功能執行中...")
+        # 3. 欄位用途初步分類 (自動識別)
+        st.divider()
+        st.subheader("🛠️ 特徵工程狀態檢查")
+        
+        # 檢查關鍵指標是否存在
+        indicators = {
+            "均線/斜率": ["ma20", "ma20_slope"],
+            "MACD 指標": ["macd", "macdh", "macdh_slope"],
+            "KD 指標": ["k", "d", "kd_gold"],
+            "背離訊號": ["macd_bottom_div", "kd_bottom_div"],
+            "未來報酬(標籤)": ["up_1-5", "up_6-10"]
+        }
+        
+        check_cols = st.columns(len(indicators))
+        for i, (name, fields) in enumerate(indicators.items()):
+            found = [f for f in fields if f in cols]
+            if len(found) == len(fields):
+                check_cols[i].metric(name, "已就緒", delta="✅")
+            elif len(found) > 0:
+                check_cols[i].metric(name, "部分遺漏", delta="⚠️", delta_color="off")
+            else:
+                check_cols[i].metric(name, "未計算", delta="❌", delta_color="inverse")
