@@ -180,7 +180,35 @@ if service:
                             df = df[mask]
 
                 # 準備顯示用 DataFrame
-                def make_wantgoo_link(s): return f"https://www.wantgoo.com/stock/{str(s).split('.')[0]}/technical-chart"
+                def make_stock_link(symbol, market):
+                    """根據市場代碼生成對應的股票超連結"""
+                    # 提取股票代碼基礎部分（去除市場後綴）
+                    base_symbol = str(symbol).split('.')[0] if '.' in str(symbol) else str(symbol)
+                    
+                    # 根據市場生成對應的連結
+                    if market == "tw":
+                        return f"https://www.wantgoo.com/stock/{base_symbol}/technical-chart"
+                    elif market == "us":
+                        return f"https://stockcharts.com/sc3/ui/?s={base_symbol}"
+                    elif market == "cn":
+                        # 陸股需要判斷是滬市還是深市，這裡簡化處理
+                        # 通常6開頭是滬市，0或3開頭是深市
+                        if base_symbol.startswith('6'):
+                            return f"https://quote.eastmoney.com/sh{base_symbol}.html"
+                        else:
+                            return f"https://quote.eastmoney.com/sz{base_symbol}.html"
+                    elif market == "hk":
+                        # 港股需要5位數字代碼，前面補0
+                        formatted_symbol = base_symbol.zfill(5)
+                        return f"http://www.aastocks.com/tc/stocks/quote/quick-quote.aspx?symbol={formatted_symbol}"
+                    elif market == "jp":
+                        # 日股添加.T後綴
+                        return f"https://www.rakuten-sec.co.jp/web/market/search/quote.html?ric={base_symbol}.T"
+                    elif market == "kr":
+                        return f"https://finance.naver.com/item/main.naver?code={base_symbol}"
+                    else:
+                        # 默認返回台股連結
+                        return f"https://www.wantgoo.com/stock/{base_symbol}/technical-chart"
                 
                 core_cols = ['date', 'symbol', 'close', 'ytd_ret', up_col, down_col]
                 available_show = [c for c in core_cols if c in df.columns] + existing_features
@@ -191,7 +219,7 @@ if service:
                         available_show += ['macd_bottom_div', 'kd_bottom_div']
                 
                 res_df = df[available_show].copy()
-                res_df['分析'] = res_df['symbol'].apply(make_wantgoo_link)
+                res_df['分析'] = res_df['symbol'].apply(lambda x: make_stock_link(x, market_code))
 
                 # 顯示表格
                 st.subheader(f"🚀 {year}年{month}月 符合訊號標的 (共 {len(df)} 筆)")
@@ -201,7 +229,7 @@ if service:
                     "ytd_ret": st.column_config.NumberColumn("YTD(%)", format="%.2f%%"),
                     up_col: st.column_config.NumberColumn("未來漲幅", format="%.2f%%"),
                     down_col: st.column_config.NumberColumn("未來跌幅", format="%.2f%%"),
-                    "分析": st.column_config.LinkColumn("玩股網", display_text="開圖"),
+                    "分析": st.column_config.LinkColumn("技術圖表", display_text="開圖"),
                 }
                 
                 # 如果有背離欄位，設定布林值顯示
