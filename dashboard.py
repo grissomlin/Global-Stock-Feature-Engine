@@ -2,6 +2,7 @@ import streamlit as st
 import os, json, sqlite3, io
 import pandas as pd
 import numpy as np
+import plotly.graph_objects as go  # 💡 補上這個，解決 'go' is not defined 錯誤
 from scipy.stats import skew, kurtosis
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
