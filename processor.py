@@ -33,13 +33,14 @@ def process_market_data(db_path):
         group['ma20'] = group['close'].rolling(window=20).mean()
         group['ma60'] = group['close'].rolling(window=60).mean()
         group['ma20_slope'] = (group['ma20'].diff(3) / 3)
-
+        # --- 增加特徵斜率計算 ---
+        group['ma60_slope'] = (group['ma60'].diff(3) / 3).round(4)
         ema12 = group['close'].ewm(span=12, adjust=False).mean()
         ema26 = group['close'].ewm(span=26, adjust=False).mean()
         group['macd'] = (ema12 - ema26)
         group['macds'] = group['macd'].ewm(span=9, adjust=False).mean()
         group['macdh'] = (group['macd'] - group['macds'])
-
+        group['macdh_slope'] = (group['macdh'].diff(1)).round(4) # 柱狀體變化速度
         low_min = group['low'].rolling(window=9).min()
         high_max = group['high'].rolling(window=9).max()
         # 避免分母為 0
