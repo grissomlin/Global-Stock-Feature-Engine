@@ -1,5 +1,5 @@
 import streamlit as st
-import os, json, sqlite3, io, pyperclip
+import os, json, sqlite3, io, urllib.parse
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go 
@@ -195,7 +195,7 @@ if not res_df.empty:
         down_matrix = create_stat_matrix(res_df, 'bin_down', existing_features)
         st.dataframe(down_matrix, use_container_width=True)
 
-        # AI 提示詞 + 複製按鈕
+        # AI 提示詞 + ChatGPT 按鈕
         st.divider()
         st.subheader("🤖 AI 量化大師提示詞")
         
@@ -211,23 +211,32 @@ if not res_df.empty:
 3. 預測此策略的風險與回報特性
 4. 提供可能的改進方向"""
 
-        # 顯示提示詞框和複製按鈕
-        cols = st.columns([4, 1])
-        with cols[0]:
-            st.code(prompt_text, language="markdown")
+        # 顯示提示詞框
+        st.code(prompt_text, language="markdown")
         
-        with cols[1]:
-            st.write("")  # 空白行對齊
-            st.write("")
-            if st.button("📋 一鍵複製到剪貼板", use_container_width=True):
+        # 按鈕區域
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            # 手動複製提示詞
+            if st.button("📋 複製提示詞到剪貼簿", use_container_width=True):
                 try:
-                    # 嘗試使用 pyperclip
                     import pyperclip
                     pyperclip.copy(prompt_text)
-                    st.success("✅ 已複製到剪貼板！")
+                    st.success("✅ 已複製到剪貼簿！")
                 except:
-                    # 如果 pyperclip 不可用，使用 streamlit 的複製功能
-                    st.info("📋 請手動複製上方程式碼")
+                    st.info("⚠️ 請手動選取並複製上方的提示詞")
+        
+        with col2:
+            # ChatGPT 連結按鈕
+            encoded_prompt = urllib.parse.quote(prompt_text)
+            st.link_button(
+                "🔥 ChatGPT 分析", 
+                f"https://chatgpt.com/?q={encoded_prompt}",
+                help="自動帶入完整分析指令",
+                use_container_width=True,
+                type="primary"
+            )
 
 # --- 7. 教學解釋區 ---
 st.divider()
