@@ -17,7 +17,6 @@ tqdm
 akshare
 pykrx
 finance-datareader
-# tokyo-stock-exchange  <-- 💡 若安裝失敗可先註解
 
 # --- 4. Google Drive 雲端同步 ---
 google-api-python-client
