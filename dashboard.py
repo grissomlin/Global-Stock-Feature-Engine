@@ -69,11 +69,32 @@ strategy_type = st.sidebar.selectbox(
 )
 
 # 💡 B. 獨立的背離選單 (從資料庫欄位對應)
+# 2. 疊加背離條件
 divergence_type = st.sidebar.selectbox(
     "2. 疊加背離條件 (必備特徵)",
     ["不限", "MACD 底部背離", "KD 底部背離", "雙重背離 (MACD+KD)"]
 )
 
+# 💡 新增：背離有效窗口選擇
+lookback_days = st.sidebar.selectbox(
+    "∟ 背離發生在最近幾天內？",
+    options=[0, 1, 2, 3, 5],
+    format_func=lambda x: "僅限當天 (共振)" if x == 0 else f"最近 {x} 天內",
+    help="由於背離常早於訊號發生。選擇『最近 3 天』代表：只要過去 3 個交易日內曾出現過背離，且『今天』符合技術策略，即會被選出。"
+)
+
+# 3. 評估期間 (加上註解與說明)
+period_options = {
+    "1-5 天 (極短線展望)": "1-5",
+    "6-10 天 (波段啟動期)": "6-10",
+    "11-20 天 (中期趨勢驗證)": "11-20"
+}
+selected_period_label = st.sidebar.selectbox(
+    "3. 評估未來報酬區間", 
+    list(period_options.keys()),
+    help="選擇訊號發生後『未來第幾天到第幾天』之間出現的最大漲跌幅。例如 6-10 天代表觀察訊號日後第 6 個交易日到第 10 個交易日的表現。"
+)
+reward_period = period_options[selected_period_label]
 # 💡 優化：評估期間增加詳細註解
 period_options = {
     "1-5 天 (極短線展望)": "1-5",
