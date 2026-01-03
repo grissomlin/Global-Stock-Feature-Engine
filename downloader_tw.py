@@ -3,7 +3,7 @@ import os, io, time, random, sqlite3, requests
 import pandas as pd
 import yfinance as yf
 from io import StringIO
-from datetime import datetime
+from datetime import datetime, timedelta
 from tqdm import tqdm
 
 # ========== 1. 環境設定 ==========
@@ -27,7 +27,16 @@ def init_db():
     finally:
         conn.close()
 
-# ========== 3. 獲取台股清單 (維持原樣) ==========
+# 💡 新增：檢查資料庫中該標的最後一筆日期
+def get_last_date(symbol, conn):
+    try:
+        query = "SELECT MAX(date) FROM stock_prices WHERE symbol = ?"
+        res = conn.execute(query, (symbol,)).fetchone()
+        return res[0] if res[0] else None
+    except:
+        return None
+
+# ========== 3. 獲取台股清單 ==========
 def get_tw_stock_list():
     url_configs = [
         {'name': 'listed', 'url': 'https://isin.twse.com.tw/isin/class_main.jsp?market=1&issuetype=1&Page=1&chklike=Y', 'suffix': '.TW'},
@@ -44,8 +53,6 @@ def get_tw_stock_list():
     stock_list = []
     
     for cfg in url_configs:
-        if 'warrant' in cfg['name']: continue
-            
         try:
             resp = requests.get(cfg['url'], timeout=15)
             dfs = pd.read_html(StringIO(resp.text), header=0)
@@ -71,10 +78,10 @@ def get_tw_stock_list():
     conn.close()
     return list(set(stock_list))
 
-# ========== 4. 下載邏輯 (修改為接受外部日期) ==========
+# ========== 4. 下載邏輯 (支援增量更新) ==========
 def download_one_stable(symbol, start_date, end_date):
     try:
-        # 直接使用傳入的 start_date 與 end_date
+        # yfinance 的 end_date 是不包含的，所以若要抓到今天，end_date 建議設為明天
         df = yf.download(symbol, start=start_date, end=end_date, progress=False, timeout=20, 
                          auto_adjust=True, threads=False)
         if df is None or df.empty: return None
@@ -86,14 +93,13 @@ def download_one_stable(symbol, start_date, end_date):
         df.columns = [c.lower() for c in df.columns]
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
         
-        # 建立最終輸出表
         df_final = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
         df_final['symbol'] = symbol
         return df_final
     except:
         return None
 
-# ========== 5. 主流程 (由 main.py 統一指揮) ==========
+# ========== 5. 主流程 (具備快取檢查機制) ==========
 def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
     start_time = time.time()
     init_db()
@@ -103,22 +109,37 @@ def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
         log("❌ 無法獲取股票清單")
         return {"success": 0, "total": 0}
 
-    log(f"🚀 開始同步 TW | 目標: {len(items)} 檔 | 區間: {start_date} ~ {end_date}")
+    log(f"🚀 開始同步 TW | 區間: {start_date} ~ {end_date}")
 
     success_count = 0
+    skip_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
     
-    pbar = tqdm(items, desc="TW同步")
+    pbar = tqdm(items, desc="TW增量同步")
     for symbol, name in pbar:
-        # 傳入指定日期
-        df_res = download_one_stable(symbol, start_date, end_date)
-        if df_res is not None:
+        # 💡 核心快取檢查邏輯
+        last_date_in_db = get_last_date(symbol, conn)
+        
+        actual_start = start_date
+        if last_date_in_db:
+            # 如果資料庫已有資料，計算下一天
+            next_day = (pd.to_datetime(last_date_in_db) + timedelta(days=1)).strftime('%Y-%m-%d')
+            
+            # 如果下一天已經超過了我們要抓的 end_date，就直接跳過
+            if last_date_in_db >= end_date:
+                skip_count += 1
+                continue
+            actual_start = next_day
+
+        df_res = download_one_stable(symbol, actual_start, end_date)
+        
+        if df_res is not None and not df_res.empty:
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
                           method=lambda table, conn, keys, data_iter: 
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
         
-        # 這裡的微小延遲是為了避免被 Yahoo 封鎖單一機器的 IP
+        # 稍微等待避免 Yahoo 封鎖
         time.sleep(0.05)
     
     conn.commit()
@@ -127,10 +148,9 @@ def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
     conn.close()
 
     duration = (time.time() - start_time) / 60
-    log(f"📊 同步完成！成功: {success_count} / {len(items)} | 耗時: {duration:.1f} 分鐘")
+    log(f"📊 同步完成！更新: {success_count} 檔 | 跳過: {skip_count} 檔 | 耗時: {duration:.1f} 分鐘")
     
     return {"success": success_count, "total": len(items)}
 
 if __name__ == "__main__":
-    # 若直接執行此檔案，預設抓取 2024-2025
     run_sync()
