@@ -2,11 +2,11 @@
 """
 downloader_kr.py
 ----------------
-韓股資料下載器（穩定單執行緒版）
+韓股資料下載器（穩定單執行緒連動版）
 
-✔ 改為單執行緒循環：徹底解決 yfinance 批量下載時的記憶體衝突
-✔ 整合 KIND & FDR：獲取最準確的韓國產業分類 (業種)
-✔ 日期標準化：自動處理 KST 時區問題，確保 DB 格式統一
+✔ 支援外部日期傳遞：接收 main.py 決定下載區間
+✔ 整合 KIND & FDR：獲取最準確的韓國產業分類
+✔ 單執行緒穩定版：解決 yfinance 在 KR 市場下載時的記憶體洩漏問題
 """
 
 import os, io, time, random, sqlite3, requests
@@ -62,7 +62,7 @@ def init_db():
         conn.close()
 
 def get_kr_stock_list():
-    log("📡 正在獲取完整韓股清單...")
+    log("📡 正在從 KRX 獲取完整韓股清單...")
     try:
         df_fdr = fdr.StockListing('KRX')
         kind_map = fetch_kind_industry_map()
@@ -73,6 +73,7 @@ def get_kr_stock_list():
         for _, row in df_fdr.iterrows():
             code = str(row['Code']).strip().zfill(6)
             market = str(row.get('Market', 'Unknown'))
+            # 韓國代碼規範：KOSPI 使用 .KS, KOSDAQ 使用 .KQ
             suffix = ".KS" if market == "KOSPI" else ".KQ"
             symbol = f"{code}{suffix}"
             name = str(row['Name']).strip()
@@ -95,15 +96,17 @@ def get_kr_stock_list():
         log(f"❌ 清單獲取失敗: {e}")
         return []
 
-# ========== 4. 下載核心 (單執行緒穩定版) ==========
-def download_one_kr(symbol, mode):
-    start_date = "2023-01-01" if mode == 'hot' else "2010-01-01"
+# ========== 4. 下載核心 (支援傳入日期) ==========
+def download_one_kr(symbol, start_date, end_date):
+    """
+    接收外部指定的日期區間進行下載
+    """
     max_retries = 2
     
     for attempt in range(max_retries + 1):
         try:
-            # 💡 核心修正：threads=False 徹底防止記憶體錯亂
-            df = yf.download(symbol, start=start_date, progress=False, 
+            # 💡 核心修正：使用傳入日期參數，並維持 threads=False 以防資料錯置
+            df = yf.download(symbol, start=start_date, end=end_date, progress=False, 
                              auto_adjust=True, threads=False, timeout=30)
             
             if df is None or df.empty:
@@ -118,7 +121,7 @@ def download_one_kr(symbol, mode):
             df.reset_index(inplace=True)
             df.columns = [c.lower() for c in df.columns]
             
-            # 標準化日期 (處理韓國時區)
+            # 標準化日期 (處理韓國時區與 DB 儲存格式)
             date_col = 'date' if 'date' in df.columns else df.columns[0]
             df['date_str'] = pd.to_datetime(df[date_col]).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
             
@@ -133,8 +136,11 @@ def download_one_kr(symbol, mode):
                 continue
             return None
 
-# ========== 5. 主程序 ==========
-def run_sync(mode='hot'):
+# ========== 5. 主流程 (對齊 main.py 呼叫介面) ==========
+def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
+    """
+    由 main.py 呼叫，接收全局統一的下載區間
+    """
     start_time = time.time()
     init_db()
     
@@ -142,7 +148,7 @@ def run_sync(mode='hot'):
     if not items:
         return {"success": 0, "has_changed": False}
 
-    log(f"🚀 開始韓股同步 (安全模式) | 目標: {len(items)} 檔")
+    log(f"🚀 開始韓股同步 | 區間: {start_date} ~ {end_date} | 目標: {len(items)} 檔")
 
     success_count = 0
     conn = sqlite3.connect(DB_PATH, timeout=60)
@@ -150,7 +156,8 @@ def run_sync(mode='hot'):
     # 單執行緒循環下載
     pbar = tqdm(items, desc="KR同步")
     for symbol, name in pbar:
-        df_res = download_one_kr(symbol, mode)
+        # 將日期參數交給下載核心
+        df_res = download_one_kr(symbol, start_date, end_date)
         
         if df_res is not None:
             df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
@@ -158,7 +165,7 @@ def run_sync(mode='hot'):
                           conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
             success_count += 1
             
-        # 🟢 控制下載頻率，保護 API
+        # 🟢 加入防封鎖延遲 (韓國市場對於頻繁請求較為敏感)
         time.sleep(0.05)
 
     conn.commit()
@@ -168,10 +175,10 @@ def run_sync(mode='hot'):
     conn.close()
     
     duration = (time.time() - start_time) / 60
-    log(f"📊 韓股完成 | 更新成功: {success_count} / {len(items)} | 耗時: {duration:.1f} 分鐘")
+    log(f"📊 韓股同步完成 | 更新成功: {success_count} / {len(items)} | 耗時: {duration:.1f} 分鐘")
     
     return {"success": success_count, "total": len(items), "has_changed": success_count > 0}
 
 if __name__ == "__main__":
-    run_sync(mode='hot')
-
+    # 手動執行測試
+    run_sync(start_date="2024-01-01", end_date=datetime.now().strftime("%Y-%m-%d"))
