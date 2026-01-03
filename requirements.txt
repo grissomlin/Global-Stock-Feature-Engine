@@ -1,7 +1,6 @@
 # --- 1. 核心數據架構 ---
-# 💡 指定 2.x 版本，確保與 yfinance 及最新的分析邏輯相容
 pandas>=2.1.0
-numpy>=1.24.0
+numpy>=1.26.0
 openpyxl
 lxml
 html5lib
@@ -9,17 +8,16 @@ requests
 cryptography
 python-dotenv
 pyperclip
+
 # --- 2. 核心下載與技術分析 ---
-# 💡 yfinance 建議不指定版本以獲取最新的 API 修復，或指定較新版本
 yfinance>=0.2.40
 tqdm
-# pandas-ta  <-- 💡 建議移除，改用 processor.py 內的純 Pandas 公式以避免安裝報錯
 
 # --- 3. 全球六國清單獲取 ---
 akshare
 pykrx
-tokyo-stock-exchange
 finance-datareader
+# tokyo-stock-exchange  <-- 💡 若安裝失敗可先註解
 
 # --- 4. Google Drive 雲端同步 ---
 google-api-python-client
@@ -28,23 +26,20 @@ google-auth-oauthlib
 
 # --- 5. 通知與通訊 ---
 resend
-# 如果 main.py 有用到 Telegram 也要補上
-# python-telegram-bot
 
 # --- 6. 數據加工與效能優化 ---
 pyarrow
-# 如果有用到資料庫 ORM
 peewee
+
 # --- 7. 儀表板與視覺化 ---
-streamlit           # 💡 儀表板核心
-plotly              # 💡 畫 K 線圖或報酬分佈圖非常有用
-scipy               # 💡 processor.py 做統計分析或進階清洗時可能會用到
+streamlit
+plotly
+scipy
 
 # --- 8. 數據庫與 SQL 優化 ---
-sqlalchemy          # 💡 你之前用來對帳連線 Supabase 的核心庫
-psycopg2-binary     # 💡 如果要連線 PostgreSQL (如 Supabase) 必備
+sqlalchemy
+psycopg2-binary
 
 # --- 9. 其他輔助 ---
-beautifulsoup4      # 💡 雖然有 lxml，但 bs4 對爬蟲更友善
-typing-extensions   # 💡 解決 Python 版本間類型註釋的相容性問題
-
+beautifulsoup4
+typing-extensions
