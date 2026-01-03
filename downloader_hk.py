@@ -4,9 +4,9 @@ downloader_hk.py
 ----------------
 港股資料下載器（穩定單執行緒版）
 
-✔ 改為單執行緒循環：徹底解決記憶體錯亂與數據污染
-✔ 強化判定邏輯：精準對應港股 4 位或 5 位代碼
-✔ 支援連動觸發：與 main.py 完全相容
+✔ 支援日期連動：由 main.py 統一傳遞下載區間
+✔ 強化判定邏輯：自動處理 4 位或 5 位代碼與 Yahoo Finance 格式
+✔ 結構對齊：完全支援全局自動化連動機制
 """
 
 import os, io, re, time, random, sqlite3, requests, urllib3
@@ -106,89 +106,10 @@ def get_hk_stock_list():
     conn.close()
     return stock_list
 
-# ========== 4. 下載核心邏輯 (單執行緒穩定版) ==========
-def download_one_hk(code_5d, mode):
-    start_date = "2023-01-01" if mode == "hot" else "2000-01-01"
-    
-    # 港股代碼嘗試：yfinance 有時接受 0001.HK 有時接受 1.HK
-    possible_syms = [f"{code_5d}.HK"]
-    if code_5d.startswith("0"):
-        possible_syms.append(f"{code_5d.lstrip('0')}.HK")
-
-    for sym in possible_syms:
-        try:
-            # 💡 核心修正：threads=False 防止併發錯亂
-            df = yf.download(sym, start=start_date, progress=False, 
-                             auto_adjust=True, threads=False, timeout=20)
-
-            if df is None or df.empty:
-                continue
-
-            # 處理可能出現的 MultiIndex
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-
-            df = df.reset_index()
-            df.columns = [c.lower() for c in df.columns]
-
-            # 統一日期格式
-            date_col = 'date' if 'date' in df.columns else df.columns[0]
-            df['date_str'] = pd.to_datetime(df[date_col]).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
-
-            df_final = df[['date_str', 'open', 'high', 'low', 'close', 'volume']].copy()
-            df_final.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            df_final['symbol'] = code_5d  # 資料庫存原始 5 位代碼，維持一致性
-
-            return df_final
-        except Exception:
-            continue
-    return None
-
-# ========== 5. 主流程 ==========
-def run_sync(mode="hot"):
-    start_time = time.time()
-    init_db()
-
-    stocks = get_hk_stock_list()
-    if not stocks:
-        return {"success": 0, "has_changed": False}
-
-    log(f"🚀 開始港股同步 (安全模式) | 目標: {len(stocks)} 檔")
-
-    success_count = 0
-    conn = sqlite3.connect(DB_PATH, timeout=60)
-    
-    # 使用單執行緒穩定循環
-    pbar = tqdm(stocks, desc="HK同步")
-    for code_5d, name in pbar:
-        df_res = download_one_hk(code_5d, mode)
-        
-        if df_res is not None:
-            df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
-                          method=lambda table, conn, keys, data_iter: 
-                          conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
-            success_count += 1
-            
-        # 🟢 控制下載頻率
-        time.sleep(0.05)
-
-    conn.commit()
-    
-    # 統計與優化
-    unique_cnt = conn.execute("SELECT COUNT(DISTINCT symbol) FROM stock_prices").fetchone()[0]
-    log("🧹 執行資料庫 VACUUM...")
-    conn.execute("VACUUM")
-    conn.close()
-
-    duration = (time.time() - start_time) / 60
-    log(f"📊 港股完成 | 更新成功: {success_count} / {len(stocks)} | 資料庫股票總數: {unique_cnt}")
-
-    return {
-        "success": success_count,
-        "total": len(stocks),
-        "has_changed": success_count > 0
-    }
-
-if __name__ == "__main__":
-    run_sync(mode="hot")
-
+# ========== 4. 下載核心邏輯 (支援外部日期) ==========
+def download_one_hk(code_5d, start_date, end_date):
+    """
+    下載特定港股，並支援 yfinance 不同代碼格式嘗試
+    """
+    # 港股代碼嘗試：yfinance 可能接受 0005.HK 或 5.HK
+    possible_syms = [f"{code_
