@@ -112,4 +112,88 @@ def download_one_hk(code_5d, start_date, end_date):
     下載特定港股，並支援 yfinance 不同代碼格式嘗試
     """
     # 港股代碼嘗試：yfinance 可能接受 0005.HK 或 5.HK
-    possible_syms = [f"{code_
+    possible_syms = [f"{code_5d}.HK"]
+    if code_5d.startswith("0"):
+        possible_syms.append(f"{code_5d.lstrip('0')}.HK")
+
+    for sym in possible_syms:
+        try:
+            # 💡 核心修正：使用從外部傳入的 start_date 與 end_date
+            df = yf.download(sym, start=start_date, end=end_date, progress=False, 
+                             auto_adjust=True, threads=False, timeout=20)
+
+            if df is None or df.empty:
+                continue
+
+            # 處理 MultiIndex
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+
+            df = df.reset_index()
+            df.columns = [c.lower() for c in df.columns]
+
+            # 統一日期格式
+            date_col = 'date' if 'date' in df.columns else df.columns[0]
+            df['date_str'] = pd.to_datetime(df[date_col]).dt.tz_localize(None).dt.strftime('%Y-%m-%d')
+
+            df_final = df[['date_str', 'open', 'high', 'low', 'close', 'volume']].copy()
+            df_final.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+            df_final['symbol'] = code_5d  # 回填原始 5 位格式，例如 '00005'
+
+            return df_final
+        except Exception:
+            continue
+    return None
+
+# ========== 5. 主流程 (對齊 main.py) ==========
+def run_sync(start_date="2024-01-01", end_date="2025-12-31"):
+    """
+    主同步函式，由 main.py 調用
+    """
+    start_time = time.time()
+    init_db()
+
+    stocks = get_hk_stock_list()
+    if not stocks:
+        return {"success": 0, "has_changed": False}
+
+    log(f"🚀 開始港股同步 | 區間: {start_date} ~ {end_date} | 目標: {len(stocks)} 檔")
+
+    success_count = 0
+    conn = sqlite3.connect(DB_PATH, timeout=60)
+    
+    # 使用 tqdm 顯示進度
+    pbar = tqdm(stocks, desc="HK同步")
+    for code_5d, name in pbar:
+        # 傳遞日期區間給下載核心
+        df_res = download_one_hk(code_5d, start_date, end_date)
+        
+        if df_res is not None:
+            df_res.to_sql('stock_prices', conn, if_exists='append', index=False, 
+                          method=lambda table, conn, keys, data_iter: 
+                          conn.executemany(f"INSERT OR REPLACE INTO {table.name} ({', '.join(keys)}) VALUES ({', '.join(['?']*len(keys))})", data_iter))
+            success_count += 1
+            
+        # 🟢 控制下載頻率，港股反爬蟲機制較敏感
+        time.sleep(0.05)
+
+    conn.commit()
+    
+    # 統計與優化
+    unique_cnt = conn.execute("SELECT COUNT(DISTINCT symbol) FROM stock_prices").fetchone()[0]
+    log("🧹 執行資料庫 VACUUM...")
+    conn.execute("VACUUM")
+    conn.close()
+
+    duration = (time.time() - start_time) / 60
+    log(f"📊 港股完成 | 更新成功: {success_count} / {len(stocks)} | 資料庫股票總數: {unique_cnt}")
+
+    return {
+        "success": success_count,
+        "total": len(stocks),
+        "has_changed": success_count > 0
+    }
+
+if __name__ == "__main__":
+    # 手動測試時預設下載近期區間
+    run_sync(start_date="2024-01-01", end_date=datetime.now().strftime("%Y-%m-%d"))
