@@ -1,11 +1,28 @@
 import streamlit as st
-import sqlite3
+import os, json, sqlite3, io
 import pandas as pd
-import os
-import io
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 
-# --- 核心下載函式 ---
+st.set_page_config(page_title="全球股市特徵引擎", layout="wide")
+
+# --- 1. 初始化 Google Drive 服務 ---
+def get_gdrive_service():
+    if "GDRIVE_SERVICE_ACCOUNT" not in st.secrets:
+        st.error("❌ Secrets 中缺少 GDRIVE_SERVICE_ACCOUNT")
+        return None
+    try:
+        info = json.loads(st.secrets["GDRIVE_SERVICE_ACCOUNT"])
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=['https://www.googleapis.com/auth/drive.readonly']
+        )
+        return build('drive', 'v3', credentials=creds)
+    except Exception as e:
+        st.error(f"❌ 服務初始化失敗: {e}")
+        return None
+
+# --- 2. 下載函式 ---
 def download_file(service, file_id, file_name):
     request = service.files().get_media(fileId=file_id)
     fh = io.FileIO(file_name, 'wb')
@@ -16,71 +33,51 @@ def download_file(service, file_id, file_name):
             status, done = downloader.next_chunk()
     return True
 
-# --- 讀取欄位結構 ---
-def get_table_schema(db_path):
-    conn = sqlite3.connect(db_path)
-    # 優先找加工過的分析表，找不到才找原始價格表
-    tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
-    target = 'stock_analysis' if 'stock_analysis' in tables else 'stock_prices'
-    
-    # 抓取前 5 筆資料與欄位清單
-    df_sample = pd.read_sql(f"SELECT * FROM {target} LIMIT 5", conn)
-    columns = df_sample.columns.tolist()
-    conn.close()
-    return target, columns, df_sample
+# --- 3. 核心邏輯 ---
+st.title("🌐 全球股市特徵引擎 - 數據中心")
 
-# --- 主程式介面 ---
-st.title("🇹🇼 台灣市場數據掃描 (預設)")
+service = get_gdrive_service()
 
-if online_db_list: # 延續你之前的診斷結果
-    # 預設目標：台灣資料庫
-    TARGET_DB = "tw_stock_warehouse.db"
-    
-    # 1. 檢查檔案是否存在，不存在則自動下載
-    if not os.path.exists(TARGET_DB):
-        # 從 online_db_list 找到對應的 file_id
-        tw_file = next((f for f in online_db_list if f['name'] == TARGET_DB), None)
-        if tw_file:
-            download_file(service, tw_file['id'], TARGET_DB)
-            st.success(f"✅ {TARGET_DB} 已成功同步至本地環境")
-        else:
-            st.error("❌ 雲端找不到台灣資料庫檔案")
-
-    # 2. 顯示結構分析
-    if os.path.exists(TARGET_DB):
-        table_name, cols, df_sample = get_table_schema(TARGET_DB)
+if service:
+    folder_id = st.secrets["GDRIVE_FOLDER_ID"]
+    try:
+        # 💡 這行定義了 online_db_list
+        query = f"'{folder_id}' in parents and trashed = false"
+        results = service.files().list(q=query, fields="files(id, name)").execute()
+        online_db_list = results.get('files', [])
         
-        st.header(f"📊 資料表結構：`{table_name}`")
+        # 🎯 預設台灣市場
+        TARGET_DB = "tw_stock_warehouse.db"
         
-        # 使用 Columns 呈現資訊
-        c1, c2 = st.columns([1, 2])
-        with c1:
-            st.subheader("📌 偵測到的特徵欄位")
-            st.write(cols)
-        
-        with c2:
-            st.subheader("💡 數據內容預覽")
-            st.dataframe(df_sample, use_container_width=True)
-
-        # 3. 欄位用途初步分類 (自動識別)
-        st.divider()
-        st.subheader("🛠️ 特徵工程狀態檢查")
-        
-        # 檢查關鍵指標是否存在
-        indicators = {
-            "均線/斜率": ["ma20", "ma20_slope"],
-            "MACD 指標": ["macd", "macdh", "macdh_slope"],
-            "KD 指標": ["k", "d", "kd_gold"],
-            "背離訊號": ["macd_bottom_div", "kd_bottom_div"],
-            "未來報酬(標籤)": ["up_1-5", "up_6-10"]
-        }
-        
-        check_cols = st.columns(len(indicators))
-        for i, (name, fields) in enumerate(indicators.items()):
-            found = [f for f in fields if f in cols]
-            if len(found) == len(fields):
-                check_cols[i].metric(name, "已就緒", delta="✅")
-            elif len(found) > 0:
-                check_cols[i].metric(name, "部分遺漏", delta="⚠️", delta_color="off")
+        if not os.path.exists(TARGET_DB):
+            tw_file = next((f for f in online_db_list if f['name'] == TARGET_DB), None)
+            if tw_file:
+                download_file(service, tw_file['id'], TARGET_DB)
+                st.success(f"✅ {TARGET_DB} 下載完成")
             else:
-                check_cols[i].metric(name, "未計算", delta="❌", delta_color="inverse")
+                st.warning(f"⚠️ 雲端暫無 {TARGET_DB}")
+
+        # 4. 讀取與顯示資料
+        if os.path.exists(TARGET_DB):
+            conn = sqlite3.connect(TARGET_DB)
+            # 檢查表格
+            tables = pd.read_sql("SELECT name FROM sqlite_master WHERE type='table'", conn)['name'].tolist()
+            target_table = 'stock_analysis' if 'stock_analysis' in tables else 'stock_prices'
+            
+            st.header(f"🇹🇼 台灣市場數據掃描：`{target_table}`")
+            
+            # 抓取 Schema
+            df_sample = pd.read_sql(f"SELECT * FROM {target_table} LIMIT 10", conn)
+            
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                st.subheader("📌 欄位 (Features)")
+                st.write(df_sample.columns.tolist())
+            with c2:
+                st.subheader("💡 數據預覽")
+                st.dataframe(df_sample, use_container_width=True)
+            
+            conn.close()
+
+    except Exception as e:
+        st.error(f"❌ 讀取雲端清單失敗: {e}")
