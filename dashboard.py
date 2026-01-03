@@ -148,3 +148,44 @@ if service:
 
         except Exception as e:
             st.error(f"❌ 數據讀取失敗: {e}")
+
+# --- 5. 報酬分布分箱統計 (加入在顯示表格之後) ---
+if not res_df.empty:
+    st.divider()
+    st.header(f"📊 策略報酬分布統計 (區間：未來 {reward_period} 天)")
+
+    # 定義分箱區間 (0, 5, 10 ... 100, inf)
+    bins = list(range(-100, 105, 5)) + [float('inf')]
+    labels = [f"{i}%~{i+5}%" for i in range(-100, 100, 5)] + [">100%"]
+
+    def get_bin_stats(data, column_name):
+        # 進行分箱
+        counts = pd.cut(data[column_name], bins=bins, labels=labels, right=False).value_counts().sort_index()
+        # 轉換成 DataFrame
+        stats_df = counts.reset_index()
+        stats_df.columns = ['區間', '家數']
+        # 計算比例
+        total = stats_df['家數'].sum()
+        stats_df['比例'] = stats_df['家數'].apply(lambda x: f"{(x/total*100):.2f}%" if total > 0 else "0.00%")
+        # 只顯示有資料的區間 (讓圖表更乾淨)
+        return stats_df[stats_df['家數'] > 0]
+
+    col_stats_up, col_stats_down = st.columns(2)
+
+    with col_stats_up:
+        st.subheader("📈 最大漲幅分布")
+        up_stats = get_bin_stats(res_df, up_col)
+        if not up_stats.empty:
+            st.bar_chart(up_stats.set_index('區間')['家數'], color="#2ecc71") # 綠色代表漲
+            st.table(up_stats)
+        else:
+            st.write("無漲幅數據")
+
+    with col_stats_down:
+        st.subheader("📉 最大跌幅分布")
+        down_stats = get_bin_stats(res_df, down_col)
+        if not down_stats.empty:
+            st.bar_chart(down_stats.set_index('區間')['家數'], color="#e74c3c") # 紅色代表跌
+            st.table(down_stats)
+        else:
+            st.write("無跌幅數據")
