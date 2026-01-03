@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import os, sys, sqlite3, json, time, socket, io
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
@@ -23,11 +23,24 @@ except ImportError:
 
 import downloader_tw, downloader_us, downloader_cn, downloader_hk, downloader_jp, downloader_kr
 
-# ========== Google Drive 服務函式 (純環境變數版) ==========
+# ========== 💡 快取輔助函式 ==========
+
+def get_db_last_date(db_path):
+    """檢查資料庫中所有標的最新的日期，作為全域快取參考"""
+    if not os.path.exists(db_path):
+        return None
+    try:
+        conn = sqlite3.connect(db_path)
+        # 抓取資料庫中最後一筆日期
+        res = conn.execute("SELECT MAX(date) FROM stock_prices").fetchone()
+        conn.close()
+        return res[0] if res[0] else None
+    except:
+        return None
+
+# ========== Google Drive 服務函式 ==========
 
 def get_drive_service():
-    """從環境變數讀取 JSON 憑證並初始化 Google Drive 服務"""
-    # 優先從環境變數 GDRIVE_SERVICE_ACCOUNT 讀取
     env_json = os.environ.get('GDRIVE_SERVICE_ACCOUNT')
     try:
         if env_json:
@@ -44,7 +57,6 @@ def get_drive_service():
         return None
 
 def download_db_from_drive(service, file_name):
-    """從雲端下載資料庫檔案"""
     if not GDRIVE_FOLDER_ID: return False
     query = f"name = '{file_name}' and '{GDRIVE_FOLDER_ID}' in parents and trashed = false"
     try:
@@ -53,7 +65,7 @@ def download_db_from_drive(service, file_name):
         if not items: return False
         
         file_id = items[0]['id']
-        print(f"📡 從雲端同步舊檔案: {file_name}")
+        print(f"📡 從雲端同步快取檔案: {file_name}")
         request = service.files().get_media(fileId=file_id)
         with io.FileIO(file_name, 'wb') as fh:
             downloader = MediaIoBaseDownload(fh, request, chunksize=5*1024*1024)
@@ -63,7 +75,6 @@ def download_db_from_drive(service, file_name):
     except: return False
 
 def upload_db_to_drive(service, file_path):
-    """將更新後的資料庫同步回雲端"""
     if not GDRIVE_FOLDER_ID or not os.path.exists(file_path): return False
     file_name = os.path.basename(file_path)
     media = MediaFileUpload(file_path, mimetype='application/x-sqlite3', resumable=True)
@@ -77,7 +88,7 @@ def upload_db_to_drive(service, file_path):
         else:
             meta = {'name': file_name, 'parents': [GDRIVE_FOLDER_ID]}
             service.files().create(body=meta, media_body=media).execute()
-        print(f"✅ 雲端同步完成: {file_name}")
+        print(f"✅ 雲端快取更新完成: {file_name}")
         return True
     except Exception as e:
         print(f"⚠️ {file_name} 同步失敗: {e}")
@@ -86,7 +97,6 @@ def upload_db_to_drive(service, file_path):
 # ========== 主程式邏輯 ==========
 
 def main():
-    # 支援參數：all, tw, us, cn, hk, jp, kr
     target_market = sys.argv[1].lower() if len(sys.argv) > 1 else 'all'
     module_map = {
         'tw': downloader_tw, 'us': downloader_us, 'cn': downloader_cn, 
@@ -94,35 +104,53 @@ def main():
     }
     
     markets_to_run = [target_market] if target_market in module_map else list(module_map.keys())
-    
-    # 初始化 Drive 服務
     service = get_drive_service()
+
+    # 設定預設下載區間
+    DEFAULT_START = "2024-01-01"
+    DEFAULT_END = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
 
     for m in markets_to_run:
         db_file = f"{m}_stock_warehouse.db"
         print(f"\n--- 🚀 市場啟動: {m.upper()} ---")
 
-        # 1. 嘗試下載雲端現有資料庫 (加速更新)
+        # 1. 下載雲端快取
+        has_cache = False
         if service:
-            download_db_from_drive(service, db_file)
-            # 💡 針對韓股下載額外清單 (如有需要)
+            has_cache = download_db_from_drive(service, db_file)
             if m == 'kr':
                 download_db_from_drive(service, "kr_list_all.csv")
 
-        # 2. 執行各國下載器
-        target_module = module_map.get(m)
-        if target_module:
-            print(f"📡 抓取最新行情數據...")
-            target_module.run_sync(start_date="2024-01-01", end_date="2025-12-31")
+        # 2. 💡 計算增量更新日期 (快取核心邏輯)
+        last_date = get_db_last_date(db_file)
+        if last_date:
+            # 如果快取存在，從最後一天的隔天開始抓
+            actual_start = (pd.to_datetime(last_date) + timedelta(days=1)).strftime("%Y-%m-%d")
+            print(f"📦 偵測到快取數據，最後日期: {last_date}。將從 {actual_start} 開始增量下載。")
+            
+            # 如果計算出的開始日期已經大於等於明天，則無需重複下載
+            if actual_start >= DEFAULT_END:
+                print(f"✨ 數據已是最新，跳過 {m.upper()} 下載步驟。")
+                actual_start = None # 標記為不執行
+        else:
+            actual_start = DEFAULT_START
+            print(f"🆕 無可用快取，將執行完整下載 (起始日: {actual_start})")
+
+        # 3. 執行下載 (只有在需要更新時執行)
+        if actual_start:
+            target_module = module_map.get(m)
+            if target_module:
+                print(f"📡 正在抓取 {actual_start} ~ {DEFAULT_END} 的數據...")
+                target_module.run_sync(start_date=actual_start, end_date=DEFAULT_END)
         
-        # 3. 執行特徵工程加工 (MA斜率, MACD背離, 未來報酬等)
+        # 4. 執行特徵工程加工
         if process_market_data and os.path.exists(db_file):
             print(f"🧪 執行特徵工程加工...")
             process_market_data(db_file)
         
-        # 4. 優化資料庫並回傳雲端
+        # 5. 優化資料庫並回傳雲端
         if service and os.path.exists(db_file):
-            print(f"🧹 優化資料庫並同步至雲端...")
+            print(f"🧹 優化資料庫並同步至雲端快取...")
             try:
                 conn = sqlite3.connect(db_file)
                 conn.execute("VACUUM")
